@@ -1,0 +1,263 @@
+/* ── Reset & Base ──────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #0d1117;
+  --bg-card:     #161b22;
+  --bg-card2:    #1c2128;
+  --border:      #30363d;
+  --text:        #e6edf3;
+  --text-muted:  #8b949e;
+  --accent:      #58a6ff;
+  --good:        #3fb950;
+  --close:       #d29922;
+  --off:         #f85149;
+  --radius:      12px;
+  --shadow:      0 4px 24px rgba(0,0,0,.45);
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+/* ── Layout ────────────────────────────────────────────── */
+#app {
+  display: grid;
+  grid-template-rows: 52px 1fr 48px;
+  height: 100vh;
+  padding: 0;
+}
+
+/* ── Header ────────────────────────────────────────────── */
+#header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  gap: 16px;
+}
+
+#header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: .03em;
+}
+
+#header h1 span { color: var(--text-muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+
+.ctrl-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, opacity .15s;
+  white-space: nowrap;
+}
+.btn:hover { background: #2d333b; border-color: var(--accent); }
+.btn:active { opacity: .75; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.btn-start  { border-color: var(--good);  color: var(--good); }
+.btn-pause  { border-color: var(--close); color: var(--close); }
+.btn-export { border-color: var(--accent); color: var(--accent); }
+
+/* Connection indicator */
+.conn-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--off);
+  flex-shrink: 0;
+  transition: background .3s;
+}
+.conn-dot.connected    { background: var(--good); box-shadow: 0 0 6px var(--good); }
+.conn-dot.connecting   { background: var(--close); }
+.conn-dot.disconnected { background: var(--off); }
+
+#conn-label { font-size: 12px; color: var(--text-muted); }
+
+/* ── Main grid ─────────────────────────────────────────── */
+#main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Panel toolbar ────────────────────────────────────── */
+.panel-title {
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-muted);
+  padding: 6px 10px 4px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.panel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+  line-height: 1;
+}
+.panel-btn:hover {
+  background: #2d333b;
+  color: var(--text);
+  border-color: var(--accent);
+}
+.panel-btn.active {
+  background: #1c3249;
+  color: #58a6ff;
+  border-color: #388bfd;
+}
+.panel-btn.active:hover {
+  background: #2457a0;
+  color: #e6edf3;
+}
+/* 文字型按钮（点线/柱状/跟随）自适应宽度 */
+#btn-style, #btn-follow {
+  width: auto;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+/* ── Expanded / fullscreen history panel ──────────────── */
+#panel-history.expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  border-radius: 0 !important;
+  border: none !important;
+  grid-row: unset !important;
+  grid-column: unset !important;
+}
+
+#panel-history.expanded .panel-btn[id="btn-expand"] {
+  content: '✕';
+  color: var(--off);
+  border-color: var(--off);
+}
+
+#panel-history.expanded .panel-btn[id="btn-expand"]::before {
+  content: '✕';
+}
+
+/* hide default button text when expanded */
+#panel-history.expanded #btn-expand {
+  font-size: 0;        /* hide ⛶ glyph */
+}
+#panel-history.expanded #btn-expand::before {
+  font-size: 13px;
+  content: '✕';
+}
+
+.panel canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Footer / Status bar ───────────────────────────────── */
+#footer {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+}
+
+#footer span { flex-shrink: 0; }
+#status-text { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Mic Select ────────────────────────────────────────── */
+.mic-select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  max-width: 180px;
+  cursor: pointer;
+  outline: none;
+}
+.mic-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.device-status {
+  font-size: 11px;
+  min-width: 60px;
+  white-space: nowrap;
+  transition: color 0.3s;
+}
+.device-status.ok       { color: #4caf50; }
+.device-status.switching { color: #ffb300; }
+.device-status.err      { color: #ef5350; }
+
+/* ── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
