@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react'
+import { useRef, useCallback, useEffect } from 'react'
 import { useCanvas } from '@/hooks/useCanvas'
 import type { PitchMessage, PitchPoint } from '@/types'
 
@@ -52,10 +52,16 @@ interface Props {
   /** Wall-clock time when the reference track started playing */
   wallStart?: number
   style?: 'piano' | 'line'
+  /** Number of visible MIDI semitones on Y axis (6–52, default 24) */
+  midiRange?: number
+  /** When false, Y-axis center is frozen (no auto-follow) */
+  autoFollow?: boolean
+  /** Called on wheel scroll with zoom delta (+4 or -4) */
+  onZoom?: (delta: number) => void
   className?: string
 }
 
-export function PitchHistory({ frames, refPitches, wallStart, style = 'piano', className }: Props) {
+export function PitchHistory({ frames, refPitches, wallStart, style = 'piano', midiRange = 24, autoFollow = true, onZoom, className }: Props) {
   const midiCenterRef = useRef(60)  // LERP target midi for Y-axis center
   const midiDisplayRef = useRef(60) // current smoothed center
 
@@ -80,19 +86,22 @@ export function PitchHistory({ frames, refPitches, wallStart, style = 'piano', c
     // Collect visible points
     const pts = getPoints().filter(p => p.ts >= winStart - 0.5 && p.ts <= winStart + WINDOW_SEC + 0.5)
 
-    // Update MIDI center (LERP toward voiced points)
-    const recentVoiced = pts.filter(p => p.voiced && p.midi !== null && p.ts > now - 2)
-    if (recentVoiced.length > 0) {
-      const avg = recentVoiced.reduce((s, p) => s + p.midi!, 0) / recentVoiced.length
-      midiCenterRef.current = avg
+    // Update MIDI center (LERP toward voiced points) — only when autoFollow
+    if (autoFollow) {
+      const recentVoiced = pts.filter(p => p.voiced && p.midi !== null && p.ts > now - 2)
+      if (recentVoiced.length > 0) {
+        const avg = recentVoiced.reduce((s, p) => s + p.midi!, 0) / recentVoiced.length
+        midiCenterRef.current = avg
+      }
     }
     midiDisplayRef.current += (midiCenterRef.current - midiDisplayRef.current) * 0.08
-    const midiCenter = Math.max(MIDI_MIN + 6, Math.min(MIDI_MAX - 6, midiDisplayRef.current))
+    const half      = midiRange / 2
+    const midiCenter = Math.max(MIDI_MIN + half, Math.min(MIDI_MAX - half, midiDisplayRef.current))
 
     // Visible MIDI range
-    const pixPerMidi = h / 24
-    const midiTop    = midiCenter + 12
-    const midiBot    = midiCenter - 12
+    const pixPerMidi = h / midiRange
+    const midiTop    = midiCenter + half
+    const midiBot    = midiCenter - half
 
     const tsToX  = (ts: number) => LABEL_W + ((ts - winStart) / WINDOW_SEC) * plotW
     const midiToY = (m: number) => h - ((m - midiBot) / (midiTop - midiBot)) * h
@@ -178,6 +187,18 @@ export function PitchHistory({ frames, refPitches, wallStart, style = 'piano', c
       ctx.fillText(secAgo === 0 ? '现在' : `-${secAgo}s`, x, h - 1)
     }
   })
+
+  // Wheel zoom: pass delta back to parent via onZoom
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !onZoom) return
+    const handler = (e: WheelEvent) => {
+      e.preventDefault()
+      onZoom(e.deltaY > 0 ? +4 : -4)
+    }
+    canvas.addEventListener('wheel', handler, { passive: false })
+    return () => canvas.removeEventListener('wheel', handler)
+  }, [canvasRef, onZoom])
 
   return <canvas ref={canvasRef} className={className} style={{ width: '100%', height: '100%' }} />
 }
