@@ -16,15 +16,33 @@ let _dotEl = null;
 let _labelEl = null;
 let _statusEl = null;
 
-export function initWsClient({ dotEl, labelEl, statusEl }) {
-  _dotEl = dotEl;
-  _labelEl = labelEl;
-  _statusEl = statusEl;
-  _connect();
+export function initWsClient({ dotEl, labelEl, statusEl } = {}) {
+  _dotEl   = dotEl   ?? null;
+  _labelEl = labelEl ?? null;
+  _statusEl = statusEl ?? null;
+  if (!_ws) _connect();  // 只建立一次连接
+}
+
+/** 动态更新状态 DOM 元素引用（页面切换时使用） */
+export function updateStatusEls({ dotEl, labelEl, statusEl } = {}) {
+  _dotEl    = dotEl    ?? null;
+  _labelEl  = labelEl  ?? null;
+  _statusEl = statusEl ?? null;
+  // 如果已连接，立即更新显示状态
+  if (_dotEl && _ws?.readyState === WebSocket.OPEN) {
+    _setDot('connected');
+    _setStatus('recording', _paused ? '已暂停' : '实时采集中');
+  }
 }
 
 export function addListener(fn) {
   _listeners.push(fn);
+  return fn;  // 返回函数自身作为句柄
+}
+
+export function removeListener(fn) {
+  const idx = _listeners.indexOf(fn);
+  if (idx !== -1) _listeners.splice(idx, 1);
 }
 
 export function isPaused() { return _paused; }
