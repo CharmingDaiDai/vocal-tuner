@@ -62,7 +62,7 @@ export function mount(rootEl) {
           <button class="panel-btn" id="btn-zoom-in"    title="放大音域（滚轮可缩放）">＋</button>
           <button class="panel-btn" id="btn-zoom-out"   title="缩小音域">－</button>
           <button class="panel-btn" id="btn-zoom-reset" title="重置缩放">⊡</button>
-          <button class="panel-btn active" id="btn-style"  title="切换风格：点线 / 柱状">点线</button>
+          <button class="panel-btn active" id="btn-style"  title="切换风格：Piano Roll / 折线">🎹 Piano</button>
           <button class="panel-btn active" id="btn-follow" title="自动跟随音高">跟随</button>
           <button class="panel-btn"        id="btn-expand" title="全屏展开">⛶</button>
         </span>
@@ -177,7 +177,7 @@ export function mount(rootEl) {
 
   btnStyle?.addEventListener('click', () => {
     const style = history.toggleStyle();
-    btnStyle.textContent = style === 'bar' ? '柱状' : '点线';
+    btnStyle.textContent = style === 'line' ? '📈 Line' : '🎹 Piano';
     btnStyle.classList.add('active');
   });
 
