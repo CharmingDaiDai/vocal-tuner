@@ -204,6 +204,11 @@ async function _pollJob(jobId, audioUrl, originalName, placeholder, statusEl) {
     };
     placeholder?.replaceWith(_makeCard(song));
     _updateStatusEl(statusEl);
+  } else if (data.status === 'analyzing') {
+    // 分段进度：更新占位卡片的进度文字
+    const pct = data.progress ?? 0;
+    const metaEl = placeholder?.querySelector('.song-card-meta');
+    if (metaEl) metaEl.textContent = pct > 0 ? `分析中 ${Math.round(pct * 100)}%` : '正在分析...';
   }
 }
 

@@ -22,7 +22,14 @@ export class PitchHistory {
   constructor(canvas) {
     this.canvas   = canvas;
     this.ctx      = canvas.getContext('2d');
-    this._points  = [];
+
+    // 循环缓冲区替代 Array + shift()，消除 O(n) 内存移动
+    // 容量 = BUFFER_SEC × ~22 fps + 余量，取 2 的幂方便位运算
+    this._CAP    = 2048;               // ~93s @ 22 fps
+    this._buf    = new Array(this._CAP);
+    this._wPtr   = 0;                  // 下一个写入位置
+    this._len    = 0;                  // 已存储条目数
+
     this._paused  = false;
     this._animId  = null;
 
@@ -55,16 +62,29 @@ export class PitchHistory {
     this._start();
   }
 
+  /** 迭代缓冲区内所有点（从最旧到最新），对每个点调用 fn(point) */
+  _eachPoint(fn) {
+    const { _CAP, _buf, _wPtr, _len } = this;
+    const start = _len < _CAP ? 0 : _wPtr;  // 满时从最旧位置开始
+    for (let i = 0; i < _len; i++) {
+      fn(_buf[(start + i) % _CAP]);
+    }
+  }
+
   update(msg) {
     if (this._paused) return;
     const midi = msg.voiced ? _freqToMidi(msg.freq) : null;
-    this._points.push({
+    // 写入循环缓冲区（自动覆盖最旧条目，无需 shift()）
+    this._buf[this._wPtr] = {
       ts:        msg.ts ?? Date.now() / 1000,
       midi,
       note_full: msg.note_full ?? '',
       voiced:    msg.voiced,
       cents:     msg.cents ?? 0,
-    });
+    };
+    this._wPtr = (this._wPtr + 1) % this._CAP;
+    if (this._len < this._CAP) this._len++;
+
     // 自动跟随：当音高超出可视范围边缘 25% 时平滑移动至中心
     if (this._autoFollow && msg.voiced && midi !== null) {
       const range  = this._targetMax - this._targetMin;
@@ -75,11 +95,6 @@ export class PitchHistory {
         this._targetMin = newMin;
         this._targetMax = newMin + range;
       }
-    }
-    // 裁剪过期点
-    const cutoff = (Date.now() / 1000) - BUFFER_SEC;
-    while (this._points.length > 0 && this._points[0].ts < cutoff) {
-      this._points.shift();
     }
   }
 
@@ -197,7 +212,9 @@ export class PitchHistory {
     this._drawXAxis(ctx, W, H, plotW);
 
     // ── 音高轨迹 ────────────────────────────────────────
-    const pts = this._points.filter(p => p.ts >= winStart && p.ts <= now);
+    // 从循环缓冲区收集可见窗口内的点（只扫描 _len 个条目，无内存分配开销）
+    const pts = [];
+    this._eachPoint(p => { if (p.ts >= winStart && p.ts <= now) pts.push(p); });
 
     if (pts.length === 0) {
       ctx.fillStyle    = '#484f58';

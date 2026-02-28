@@ -11,6 +11,21 @@ let _retryTimer = null;
 let _paused = false;
 let _listeners = [];
 
+// rAF 节流：onmessage 只缓存最新消息，rAF 统一分发，避免消息速率超越帧率时多余 DOM 写入
+let _pendingMsg = null;
+let _rafId = null;
+
+function _rafDispatch() {
+  if (_pendingMsg !== null) {
+    const msg = _pendingMsg;
+    _pendingMsg = null;
+    for (const fn of _listeners) fn(msg);
+  }
+  _rafId = requestAnimationFrame(_rafDispatch);
+}
+// 启动持续 rAF 循环（模块加载时开始，全生命周期运行）
+_rafId = requestAnimationFrame(_rafDispatch);
+
 // 状态 DOM 元素引用（由 index.html 注入）
 let _dotEl = null;
 let _labelEl = null;
@@ -88,8 +103,8 @@ function _connect() {
         return;
       }
       if (msg.type === 'heartbeat') return;
-      // 分发给所有监听者
-      for (const fn of _listeners) fn(msg);
+      // 仅缓存最新消息，由 rAF 循环在下一帧统一分发，避免超帧率多余调度
+      _pendingMsg = msg;
     } catch (_) {}
   };
 

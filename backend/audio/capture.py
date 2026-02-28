@@ -27,7 +27,8 @@ class AudioCapture:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self._loop = loop
-        self._queue: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=20)
+        # 单生产者广播架构下只有一个消费者，5 帧缓冲（~230ms）足够
+        self._queue: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=5)
         self._stream: Optional[sd.InputStream] = None
         self._buffer = np.zeros(0, dtype=np.float32)
         self.current_device_id: Optional[int] = None  # None = 系统默认
@@ -86,7 +87,8 @@ class AudioCapture:
             samplerate=self.sample_rate,
             channels=CHANNELS,
             dtype="float32",
-            blocksize=512,
+            # 1024 可将回调频率从 ~86 次/秒降到 ~43 次/秒，降低 CPU 压力
+            blocksize=1024,
             callback=self._callback,
         )
         self._stream.start()
