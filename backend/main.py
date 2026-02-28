@@ -51,9 +51,10 @@ is_paused = False                        # 暂停标志
 _ws_clients: Set[asyncio.Queue] = set()
 # 歌曲分析独立线程池：最小风险策略下限制为 1，避免与实时麦克风检测抢占 CPU
 _analysis_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-analysis")
-SAMPLE_RATE = 44100
-CHUNK_SIZE = 2048
-FFT_SKIP = 5       # 每 N 帧发送一次 FFT（进一步降低实时 CPU 占用）
+SAMPLE_RATE     = 44100
+CHUNK_SIZE      = 2048
+FFT_SKIP        = 5       # 每 N 帧发送一次 FFT（进一步降低实时 CPU 占用）
+JOB_TTL_SECONDS = 600     # 已完成/出错的任务在内存中最多保留 10 分钟
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 UPLOAD_DIR   = Path(__file__).parent / "uploads"
@@ -274,7 +275,7 @@ class DeviceRequest(BaseModel):
 
 @app.post("/api/device")
 async def switch_device(req: DeviceRequest):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         await asyncio.to_thread(capture.switch_device, loop, req.device_id)
         dev_name = capture._get_device_name(req.device_id)
@@ -346,6 +347,7 @@ async def upload_and_analyze(file: UploadFile = File(...)):
                 job["fine_pitches"] = result["fine_pitches"]
                 job["duration"]     = result["duration"]
                 job["rms"]          = result["rms"]
+                job["completed_at"] = time.time()
                 logger.info(f"[Analyze] {job_id} 分析完成，duration={result['duration']:.1f}s")
                 save_payload = {
                     "original_name": job["original_name"],
@@ -362,8 +364,9 @@ async def upload_and_analyze(file: UploadFile = File(...)):
             logger.error(f"[Analyze] {job_id} 失败：{e}")
             job = _jobs.get(job_id)
             if job:
-                job["status"] = "error"
-                job["error"]  = str(e)
+                job["status"]       = "error"
+                job["error"]        = str(e)
+                job["completed_at"] = time.time()
 
     asyncio.create_task(_run_analysis())
 
@@ -409,10 +412,34 @@ async def get_analysis(job_id: str):
     """查询分析任务进度。
     status 枚举：analyzing | done | error
     done 时返回 fine_pitches、duration、rms。
+    服务重启后退回查询持久化 Store。
     """
+    # ── TTL 清理：移除已完成超过 JOB_TTL_SECONDS 的内存条目 ──
+    now_ts = time.time()
+    stale = [
+        jid for jid, j in list(_jobs.items())
+        if j.get("status") in ("done", "error") and
+           now_ts - j.get("completed_at", now_ts) > JOB_TTL_SECONDS
+    ]
+    for jid in stale:
+        _jobs.pop(jid, None)
+
     job = _jobs.get(job_id)
+
+    # ── 服务重启后内存无记录：降级查持久化 Store ──────────────
     if job is None:
-        return JSONResponse({"error": "任务不存在"}, status_code=404)
+        meta = await asyncio.to_thread(store.load, job_id)
+        if meta is None:
+            return JSONResponse({"error": "任务不存在"}, status_code=404)
+        return {
+            "job_id":        job_id,
+            "status":        "done",
+            "filename":      meta.get("filename", ""),
+            "original_name": meta.get("original_name"),
+            "duration":      meta.get("duration"),
+            "audio_url":     f"/uploads/{meta.get('filename', '')}",
+            "progress":      1.0,
+        }
 
     resp: dict = {
         "job_id":        job_id,
@@ -466,6 +493,10 @@ async def websocket_pitch(ws: WebSocket):
         logger.error(f"WebSocket 异常：{e}")
     finally:
         _ws_clients.discard(q)
+        # 最后一个客户端断开时重置 smoother 状态，
+        # 防止残留 debounce 缓存污染下一次连接
+        if not _ws_clients:
+            smoother.reset()
 
 
 if __name__ == "__main__":

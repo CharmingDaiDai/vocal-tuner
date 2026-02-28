@@ -110,5 +110,9 @@ export class AudioPlayer {
     this._stopRaf();
     this._el.pause();
     this._el.src = '';
+    this._el.load();          // 释放解码器/网络资源
+    this.onTimeUpdate = null;
+    this.onEnded      = null;
+    this.onError      = null;
   }
 }

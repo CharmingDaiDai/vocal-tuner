@@ -6,6 +6,8 @@ song_analyzer.py — 歌曲音高分析流水线
 """
 
 import logging
+import os
+import statistics
 from typing import Callable
 
 import numpy as np
@@ -25,12 +27,24 @@ CHUNK_SEC  = 30     # 每段分析长度（秒）—— 分段推进进度
 
 # ── 工具 ──────────────────────────────────────────────────
 
+# 离线分析置信度下限（与实时 smoother 对齐）
+OFFLINE_CONF_THRESH = float(os.getenv("PITCH_CONF_THRESH", "0.45"))
+# 离线分析跳变检测阈值（半音）
+OFFLINE_JUMP_THRESH = float(os.getenv("PITCH_JUMP_THRESH", "9"))
+
+
 def _run_pyin_segment(y: np.ndarray, sr: int, offset_sec: float,
                       hop_length: int, frame_length: int) -> list[dict]:
     """
     对一段音频运行 pYIN，返回每帧字典列表，时间戳基于 offset_sec 偏移。
+
+    改进（与实时 PitchSmoother 对齐）：
+      1. voiced_prob < OFFLINE_CONF_THRESH → voiced=False（置信度门控）
+      2. 存储浮点 midi（保留 cents 级别精度，不再 int(round(...))）
+      3. 后处理跳变检测：与前 3 voiced 帧中位 midi 相差 > OFFLINE_JUMP_THRESH
+         个半音的孤立帧置为 voiced=False
     """
-    f0, voiced_flag, _ = librosa.pyin(
+    f0, voiced_flag, voiced_prob = librosa.pyin(
         y,
         fmin=FMIN,
         fmax=FMAX,
@@ -39,20 +53,42 @@ def _run_pyin_segment(y: np.ndarray, sr: int, offset_sec: float,
         hop_length=hop_length,
     )
 
-    frames = []
-    for i, (freq_raw, voiced) in enumerate(zip(f0, voiced_flag)):
+    frames: list[dict] = []
+    for i, (freq_raw, voiced, vp) in enumerate(zip(f0, voiced_flag, voiced_prob)):
         t        = float(offset_sec + i * hop_length / sr)
         raw_freq = float(freq_raw) if not np.isnan(freq_raw) else 0.0
         v        = bool(voiced) and raw_freq > 0
-        freq     = raw_freq if v else 0.0
-        midi     = int(round(69 + 12 * np.log2(freq / 440.0))) if v else None
+        conf     = float(vp)
+
+        # 层 1：置信度门控
+        if v and conf < OFFLINE_CONF_THRESH:
+            v = False
+
+        freq = raw_freq if v else 0.0
+        # 浮点 midi，保留 2 位小数（cents 级别精度）
+        midi = round(69 + 12 * np.log2(freq / 440.0), 2) if v and freq > 0 else None
 
         frames.append({
-            "t":      round(t, 4),
-            "freq":   round(freq, 3),
-            "voiced": v,
-            "midi":   midi,
+            "t":          round(t, 4),
+            "freq":       round(freq, 3),
+            "voiced":     v,
+            "midi":       midi,
+            "confidence": round(conf, 4),
         })
+
+    # 层 2：后处理跳变检测（孤立刺点过滤）
+    recent_midi: list[float] = []
+    for fr in frames:
+        if not fr["voiced"] or fr["midi"] is None:
+            continue
+        if len(recent_midi) >= 3:
+            med = statistics.median(recent_midi[-3:])
+            if abs(fr["midi"] - med) > OFFLINE_JUMP_THRESH:
+                fr["voiced"] = False
+                fr["midi"]   = None
+                fr["freq"]   = 0.0
+                continue
+        recent_midi.append(fr["midi"])
 
     return frames
 

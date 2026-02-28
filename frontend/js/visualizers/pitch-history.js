@@ -253,8 +253,12 @@ export class PitchHistory {
       ctx.textBaseline = 'middle';
       ctx.fillText('等待音频输入...', LABEL_W + plotW / 2, H / 2);
     } else {
-      // ── 4. 水平色块轨迹 ─────────────────────────────────
-      this._drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi, winStart);
+      // ── 4. 轨迹渲染（Piano Roll / 折线两种风格）─────────
+      if (this._style === 'line') {
+        this._drawLineTrack(ctx, pts, tsToX, midiToY, W, H, winStart);
+      } else {
+        this._drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi, winStart);
+      }
 
       // ── 5. 最近 4 个有声帧拖尾指示器 ──────────────────
       const recentVoiced = [];
@@ -516,6 +520,54 @@ export class PitchHistory {
   }
 
   // ────────────────────────────────────────────────────────
+  //  折线风格轨迹（line style）
+  // ────────────────────────────────────────────────────────
+  _drawLineTrack(ctx, pts, tsToX, midiToY, W, H, winStart) {
+    // 将连续 voiced 帧合并成折线段
+    const segments = [];
+    let seg = null;
+    for (const p of pts) {
+      if (!p.voiced || p.midi === null) {
+        seg = null; continue;
+      }
+      if (!seg || (p.ts - seg.lastTs) > MAX_GAP_SEC) {
+        seg = { pts: [p], lastTs: p.ts };
+        segments.push(seg);
+      } else {
+        seg.pts.push(p);
+        seg.lastTs = p.ts;
+      }
+    }
+
+    ctx.save();
+    ctx.lineWidth  = 2;
+    ctx.lineJoin   = 'round';
+    ctx.lineCap    = 'round';
+
+    for (const s of segments) {
+      if (s.pts.length === 0) continue;
+      const midTs   = (s.pts[0].ts + s.pts[s.pts.length - 1].ts) / 2;
+      const ageFrac = Math.max(0, Math.min(1, (midTs - winStart) / WINDOW_SEC));
+      const alpha   = 0.25 + ageFrac * 0.75;
+
+      const avgCents = s.pts.reduce((a, p) => a + (p.cents ?? 0), 0) / s.pts.length;
+      const color    = _tuneColor(avgCents);
+
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur  = 4;
+      ctx.beginPath();
+      ctx.moveTo(tsToX(s.pts[0].ts), midiToY(s.pts[0].midi));
+      for (let i = 1; i < s.pts.length; i++) {
+        ctx.lineTo(tsToX(s.pts[i].ts), midiToY(s.pts[i].midi));
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ────────────────────────────────────────────────────────
   //  当前音高发光指示器（最近几个帧拖尾，newest-first 数组）
   // ────────────────────────────────────────────────────────
   _drawCurrentIndicator(ctx, recentVoiced, tsToX, midiToY, W, H) {
@@ -597,6 +649,7 @@ export class PitchHistory {
   _drawRefTrack(ctx, winStart, tsToX, midiToY, pixPerMidi) {
     if (!this._wallStart) return;
     const barH = Math.max(3, Math.min(pixPerMidi * 0.55, 16));
+    const radius = barH / 2;
     const refPts = this._refPitches
       .filter(p => p.voiced && p.midi != null)
       .map(p => ({ ...p, ts: this._wallStart + p.t }))
@@ -604,26 +657,51 @@ export class PitchHistory {
     if (refPts.length === 0) return;
 
     ctx.save();
-    ctx.globalAlpha = 0.45;
+    ctx.globalAlpha = 0.50;
     ctx.fillStyle   = '#58a6ff';
 
-    // 同样做合并分段
+    // 分段（多帧和并）并对每段用 ribbon 路径，与实时弹奏轨道保持一致
     let rSeg = null;
     const rSegs = [];
     for (const p of refPts) {
-      if (!rSeg || (p.ts - rSeg.endTs) > MAX_GAP_SEC) {
-        rSeg = { x0: tsToX(p.ts), endX: tsToX(p.ts), midi: p.midi, endTs: p.ts };
+      if (!rSeg || (p.ts - rSeg.lastTs) > MAX_GAP_SEC) {
+        rSeg = { pts: [p], lastTs: p.ts };
         rSegs.push(rSeg);
       } else {
-        rSeg.endX  = tsToX(p.ts);
-        rSeg.endTs = p.ts;
+        rSeg.pts.push(p);
+        rSeg.lastTs = p.ts;
       }
     }
+
     for (const s of rSegs) {
-      const y    = midiToY(s.midi);
-      const segW = Math.max(3, s.endX - s.x0 + 2);
+      const pts = s.pts;
+      const n   = pts.length;
+      if (n === 0) continue;
+
+      if (n === 1) {
+        const y = midiToY(pts[0].midi);
+        ctx.beginPath();
+        ctx.roundRect(tsToX(pts[0].ts) - barH / 2, y - barH / 2, barH, barH, radius);
+        ctx.fill();
+        continue;
+      }
+
+      const x0 = tsToX(pts[0].ts);
+      const y0 = midiToY(pts[0].midi);
+      const xN = tsToX(pts[n - 1].ts);
+      const yN = midiToY(pts[n - 1].midi);
+
       ctx.beginPath();
-      ctx.roundRect(s.x0, y - barH / 2, segW, barH, barH / 2);
+      ctx.moveTo(x0, y0 - barH / 2);
+      for (let i = 1; i < n; i++) {
+        ctx.lineTo(tsToX(pts[i].ts), midiToY(pts[i].midi) - barH / 2);
+      }
+      ctx.arc(xN, yN, barH / 2, -Math.PI / 2, Math.PI / 2);
+      for (let i = n - 2; i >= 0; i--) {
+        ctx.lineTo(tsToX(pts[i].ts), midiToY(pts[i].midi) + barH / 2);
+      }
+      ctx.arc(x0, y0, barH / 2, Math.PI / 2, -Math.PI / 2, true);
+      ctx.closePath();
       ctx.fill();
     }
     ctx.restore();
@@ -692,7 +770,8 @@ export class PitchHistory {
 
 function _freqToMidi(freq) {
   if (!freq || freq <= 0) return null;
-  return Math.round(69 + 12 * Math.log2(freq / 440));
+  // 保留浮点精度（2 位小数），避免 Math.round 导致 Y 轴仅能对齐半音格线
+  return Math.round((69 + 12 * Math.log2(freq / 440)) * 100) / 100;
 }
 
 function _midiName(m) {

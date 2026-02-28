@@ -41,6 +41,12 @@ export async function mount(rootEl) {
       <span id="k-time" class="k-time">0:00 / 0:00</span>
     </div>
     <div class="k-controls">
+      <span class="k-mic-group">
+        <label for="k-mic-select" class="k-mic-label" title="选择麦克风">🎙</label>
+        <select id="k-mic-select" class="k-mic-select" title="选择麦克风设备">
+          <option value="">加载中...</option>
+        </select>
+      </span>
       <input type="range" id="k-seek" min="0" max="100" value="0" step="0.1" class="k-seek">
       <button class="k-btn k-play" id="k-play" disabled>▶</button>
       <label class="k-chk"><input type="checkbox" id="k-loop"> 循环</label>
@@ -78,6 +84,11 @@ export async function mount(rootEl) {
   _history  = new PitchHistory(rootEl.querySelector('#k-canvas-history'));
   _overview = new SongOverview(rootEl.querySelector('#k-canvas-overview'));
   _player   = new AudioPlayer();
+  _player.onError = (e) => {
+    console.error('[AudioPlayer] error', e);
+    const loadingTxt = rootEl.querySelector('#k-loading-txt');
+    if (loadingTxt) loadingTxt.textContent = '音频加载失败，请检查文件';
+  };
 
   // ── 绑定按钮 ─────────────────────────────────────────────
   rootEl.querySelector('#k-back')?.addEventListener('click', () => navigate('library'));
@@ -138,6 +149,9 @@ export async function mount(rootEl) {
     setTimeout(() => navigate('library'), 2000);
   }
 
+  // 麦克风设备选择
+  _loadDevices(rootEl);
+
   // 初始显示 HUD
   showHud();
 }
@@ -145,13 +159,60 @@ export async function mount(rootEl) {
 // ── 卸载 ─────────────────────────────────────────────────
 export function unmount() {
   if (_handler) { removeListener(_handler); _handler = null; }
-  if (_player)  { _player.pause(); _player = null; }
+  if (_player)  { _player.destroy(); _player = null; }
   if (_hudTimer) { clearTimeout(_hudTimer); _hudTimer = null; }
   _history  = null;
   _overview = null;
   _rootEl   = null;
 }
+// ── 麦克风设备加载与切换 ────────────────────────────────────────
 
+async function _loadDevices(rootEl) {
+  const sel = rootEl.querySelector('#k-mic-select');
+  if (!sel) return;
+  let devices = [];
+  try {
+    const res  = await fetch('/api/devices');
+    const data = await res.json();
+    devices = data.devices ?? [];
+  } catch {
+    sel.innerHTML = '<option value="">获取失败</option>';
+    return;
+  }
+  sel.innerHTML = '';
+  for (const d of devices) {
+    const opt = document.createElement('option');
+    opt.value = d.id;
+    opt.textContent = (d.is_default ? '★ ' : '') + d.name;
+    if (d.is_active) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (devices.length === 0) sel.innerHTML = '<option value="">无可用设备</option>';
+
+  sel.addEventListener('change', async () => {
+    const deviceId = sel.value === '' ? null : parseInt(sel.value, 10);
+    const prev = sel.dataset.prev ?? sel.value;
+    sel.disabled = true;
+    try {
+      const res  = await fetch('/api/device', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: deviceId }),
+      });
+      const data = await res.json();
+      if (data.status !== 'ok') {
+        // 切换失败，回滚选项
+        sel.value = prev;
+      } else {
+        sel.dataset.prev = sel.value;
+      }
+    } catch {
+      sel.value = prev;
+    } finally {
+      sel.disabled = false;
+    }
+  });
+  sel.dataset.prev = sel.value;
+}
 // ── 加载歌曲 ─────────────────────────────────────────────
 
 async function _loadSong(jobId) {

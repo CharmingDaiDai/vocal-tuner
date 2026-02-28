@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # 注意：detector.py 已修复为取"最高置信度帧"而非"末帧"，
 # 纯正弦波下 max_prob ≈ 0.95，正常人声下通常 ≥ 0.60，
 # 因此 0.45 是合理下限（过滤 HMM 极度不确定的帧）。
-_CONF_THRESH        = float(os.getenv("PITCH_CONF_THRESH",        "0.45"))
+_CONF_THRESH        = float(os.getenv("PITCH_CONF_THRESH",        "0.05"))
 _JUMP_THRESH_ST     = float(os.getenv("PITCH_JUMP_THRESH",        "9"))    # 半音
 _MIN_VOICED_FRAMES  = int(  os.getenv("PITCH_MIN_VOICED_FRAMES",  "3"))
 
