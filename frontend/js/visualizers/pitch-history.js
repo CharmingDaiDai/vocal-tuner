@@ -438,67 +438,80 @@ export class PitchHistory {
       return avgConf >= 0.75;
     });
 
-    // 绘制每个音符块（水平胶囊色块，全部用 roundRect，不再用 arc）
+    // 绘制每个音符块（沿实际音高采样点的 ribbon 色带，两端保留半圆）
     for (const s of filteredSegs) {
       if (s.pts.length === 0) continue;
-      const first = s.pts[0];
-      const last  = s.pts[s.pts.length - 1];
+      const pts  = s.pts;
+      const n    = pts.length;
+      const first = pts[0];
+      const last  = pts[n - 1];
 
       // 时间淡出：越旧越透明（0.20 → 1.0）
-      const midTs   = (first.ts + last.ts) / 2;
-      const ageFrac = Math.max(0, Math.min(1, (midTs - winStart) / WINDOW_SEC));
+      const midTs     = (first.ts + last.ts) / 2;
+      const ageFrac   = Math.max(0, Math.min(1, (midTs - winStart) / WINDOW_SEC));
       const baseAlpha = 0.20 + ageFrac * 0.80;
 
-      const x0   = tsToX(first.ts);
-      const x1   = tsToX(last.ts) + 2;  // 略延伸避免闪烁
-      // 单帧也保证最小宽度 = barH（形成圆形胶囊），不再用 arc
-      const segW = Math.max(barH, x1 - x0);
-
-      const avgMidi  = s.pts.reduce((a, p) => a + p.midi, 0) / s.pts.length;
-      const avgCents = s.pts.reduce((a, p) => a + (p.cents ?? 0), 0) / s.pts.length;
+      const avgCents = pts.reduce((a, p) => a + (p.cents ?? 0), 0) / n;
       const color    = _tuneColor(avgCents);
-      const y        = midiToY(avgMidi);
 
-      // 主色块（统一用圆角矩形胶囊）
+      // ── 单帧：round pill ──────────────────────────────
+      if (n === 1) {
+        const y = midiToY(first.midi);
+        ctx.save();
+        ctx.shadowColor = color; ctx.shadowBlur = 6;
+        ctx.globalAlpha = baseAlpha * 0.9;
+        ctx.fillStyle   = color;
+        ctx.beginPath();
+        ctx.roundRect(tsToX(first.ts) - barH / 2, y - barH / 2, barH, barH, radius);
+        ctx.fill();
+        ctx.restore();
+        continue;
+      }
+
+      // ── 多帧：沿实际音高绘制 ribbon 路径 ─────────────
+      // 路径 = 上边缘（各帧顶部）→ 右圆弧 → 下边缘（各帧底部，倒序）→ 左圆弧
+      const x0 = tsToX(first.ts);
+      const xN = tsToX(last.ts);
+      const y0 = midiToY(first.midi);
+      const yN = midiToY(last.midi);
+
       ctx.save();
-      ctx.shadowColor  = color;
-      ctx.shadowBlur   = 6;
-      ctx.globalAlpha  = baseAlpha * 0.9;
+      ctx.shadowColor = color; ctx.shadowBlur = 6;
+      ctx.globalAlpha = baseAlpha * 0.9;
+      ctx.fillStyle   = color;
       ctx.beginPath();
-      ctx.roundRect(x0, y - barH / 2, segW, barH, radius);
-      ctx.fillStyle = color;
+
+      // 上边缘：从第一帧顶部逐点连到最后帧顶部
+      ctx.moveTo(x0, y0 - barH / 2);
+      for (let i = 1; i < n; i++) {
+        ctx.lineTo(tsToX(pts[i].ts), midiToY(pts[i].midi) - barH / 2);
+      }
+      // 右半圆（从顶部 → 底部，顺时针）
+      ctx.arc(xN, yN, barH / 2, -Math.PI / 2, Math.PI / 2);
+      // 下边缘：从最后帧底部逐点连回第一帧底部
+      for (let i = n - 2; i >= 0; i--) {
+        ctx.lineTo(tsToX(pts[i].ts), midiToY(pts[i].midi) + barH / 2);
+      }
+      // 左半圆（从底部 → 顶部，逆时针）
+      ctx.arc(x0, y0, barH / 2, Math.PI / 2, -Math.PI / 2, true);
+      ctx.closePath();
       ctx.fill();
       ctx.restore();
 
-      // 高光细线（顶部 1px 白色，增加立体感）
+      // 高光细线：沿上边缘轮廓走（增加立体感）
       ctx.save();
       ctx.globalAlpha = baseAlpha * 0.25;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth   = 1;
+      ctx.lineJoin    = 'round';
       ctx.beginPath();
-      ctx.moveTo(x0 + radius, y - barH / 2 + 0.5);
-      ctx.lineTo(x0 + segW - radius, y - barH / 2 + 0.5);
+      ctx.moveTo(x0 + 1, y0 - barH / 2 + 0.5);
+      for (let i = 1; i < n - 1; i++) {
+        ctx.lineTo(tsToX(pts[i].ts), midiToY(pts[i].midi) - barH / 2 + 0.5);
+      }
+      ctx.lineTo(xN - 1, yN - barH / 2 + 0.5);
       ctx.stroke();
       ctx.restore();
-
-      // 若帧间 midi 起伏明显，叠加平滑连线（滑音曲线），降低至 20% 不透明度
-      const midiRange = Math.max(...s.pts.map(p => p.midi)) - Math.min(...s.pts.map(p => p.midi));
-      if (midiRange >= 1 && s.pts.length >= 3) {
-        ctx.save();
-        ctx.strokeStyle = 'rgba(255,255,255,0.20)';
-        ctx.lineWidth   = 1.5;
-        ctx.lineJoin    = 'round';
-        ctx.lineCap     = 'round';
-        ctx.globalAlpha = baseAlpha;
-        ctx.beginPath();
-        s.pts.forEach((p, i) => {
-          const px = tsToX(p.ts);
-          const py = midiToY(p.midi);
-          i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
-        });
-        ctx.stroke();
-        ctx.restore();
-      }
     }
   }
 
