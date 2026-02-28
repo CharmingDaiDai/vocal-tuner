@@ -1,31 +1,34 @@
 """
-Vocal Tuner — FastAPI 后端
-- WS  /ws/pitch             : 实时推送音高检测数据
-- POST /api/pause           : 暂停推送
-- POST /api/resume          : 恢复推送
-- POST /api/analyze         : 上传音频文件并触发后台分析
-- GET  /api/analyze/{job_id}: 查询分析任务进度与结果
-- GET  /api/library         : 已持久化的歌曲元数据列表
-- GET  /api/library/{job_id}: 获取完整分析数据（含 pitches）
-- DELETE /api/library/{job_id}: 删除歌曲及音频文件
-- GET  /                    : 静态服务前端 index.html
-- GET  /api/devices         : 列出可用麦克风设备
+Vocal Tuner — FastAPI 后端 v2
+
+架构改进：
+- ProcessPoolExecutor 替代 ThreadPoolExecutor 用于歌曲分析，绕过 GIL，
+  分析期间不影响实时音高检测和 WebSocket 推流
+- Per-client PitchSmoother：每个 WebSocket 连接独立实例，局域网多设备互不干扰
+- multiprocessing.Value 进度共享：主进程定时轮询，真正异步更新进度
+- Pydantic v2 统一响应模型
+- CORS + 0.0.0.0 绑定，支持局域网多台设备访问
+- /api/server-info 返回局域网 IP，方便前端提示
 """
 
 import asyncio
 import json
 import logging
+import multiprocessing as mp
 import shutil
+import socket
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Set
+from typing import Dict, Optional
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -34,8 +37,8 @@ from audio.capture import AudioCapture
 from pitch.detector import detect_pitch, compute_fft, warmup
 from pitch.music_theory import freq_to_note, is_in_tune
 from pitch.smoother import PitchSmoother
-from pitch.song_analyzer import analyze_audio_file
 from pitch.analysis_store import AnalysisStore
+from worker import worker_init, analyze_task
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,55 +46,66 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── 全局状态 ──────────────────────────────────────────────
-capture  = AudioCapture()
-smoother = PitchSmoother()               # 实时音高异常点过滤器
-is_paused = False                        # 暂停标志
-# 每个 WebSocket 连接对应一个私有队列，广播循环写入，连接读取
-_ws_clients: Set[asyncio.Queue] = set()
-# 歌曲分析独立线程池：最小风险策略下限制为 1，避免与实时麦克风检测抢占 CPU
-_analysis_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="song-analysis")
-SAMPLE_RATE     = 44100
-CHUNK_SIZE      = 2048
-FFT_SKIP        = 5       # 每 N 帧发送一次 FFT（进一步降低实时 CPU 占用）
-JOB_TTL_SECONDS = 600     # 已完成/出错的任务在内存中最多保留 10 分钟
+# ── Constants ─────────────────────────────────────────────
+SAMPLE_RATE      = 44100
+CHUNK_SIZE       = 2048
+FFT_SKIP         = 5
+JOB_TTL_SECONDS  = 600
+PROGRESS_POLL_MS = 300
+WORKER_PROCESSES = 2
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-UPLOAD_DIR   = Path(__file__).parent / "uploads"
+BACKEND_DIR  = Path(__file__).parent
+STATIC_DIR   = BACKEND_DIR / "static"
+UPLOAD_DIR   = BACKEND_DIR / "uploads"
+LEGACY_DIR   = BACKEND_DIR.parent / "frontend"
 
-# ── 持久化存储 ────────────────────────────────────────────
-store = AnalysisStore(UPLOAD_DIR)
-
-# ── 分析任务状态字典 ──────────────────────────────────────
-# job_id -> {
-#   status:   'uploading' | 'analyzing' | 'done' | 'error'
-#   filename: str
-#   filepath: str
-#   duration: float | None
-#   fine_pitches:   list | None
-#   rms:            list | None
-#   error:          str  | None
-# }
-_jobs: dict[str, dict] = {}
+# ── Global shared state ───────────────────────────────────
+capture   = AudioCapture()
+is_paused = False
+store     = AnalysisStore(UPLOAD_DIR)
+_jobs: Dict[str, dict] = {}
 
 
-# ── 单生产者广播循环 ──────────────────────────────────────
+# ── Per-client session ────────────────────────────────────
+@dataclass
+class ClientSession:
+    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=10))
+    smoother: PitchSmoother = field(default_factory=PitchSmoother)
+
+
+_ws_clients: Dict[str, ClientSession] = {}
+
+# ── ProcessPool for song analysis ────────────────────────
+_analysis_executor: Optional[ProcessPoolExecutor] = None
+
+
+def _get_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+# ── Broadcast loop ────────────────────────────────────────
 async def _pitch_broadcast_loop():
     """
-    单一协程读取麦克风帧、检测音高，将结果广播给所有 WebSocket 连接。
-    每帧只调用一次 detect_pitch / compute_fft，无论当前接入多少个客户端。
+    Single-producer coroutine: reads mic frames, runs detect_pitch ONCE,
+    then lets each client session run its own smoother.
     """
     frame_count = 0
     while True:
         try:
-            frame: np.ndarray | None = await capture.get_frame(timeout=0.5)
+            frame: Optional[np.ndarray] = await capture.get_frame(timeout=0.5)
 
             if frame is None:
-                # 超时心跳
                 hb = json.dumps({"type": "heartbeat", "ts": time.time()})
-                for q in list(_ws_clients):
+                for sess in list(_ws_clients.values()):
                     try:
-                        q.put_nowait(hb)
+                        sess.queue.put_nowait(hb)
                     except asyncio.QueueFull:
                         pass
                 continue
@@ -102,70 +116,61 @@ async def _pitch_broadcast_loop():
 
             frame_count += 1
 
-            # 音高检测：只跑一次，结果广播给所有客户端
             raw_result = await asyncio.to_thread(
                 detect_pitch, frame, SAMPLE_RATE, CHUNK_SIZE
             )
-            # 在检测结果上附加时间戳，使 debounce 缓存帧保留原始时间
             raw_result["_ts"] = time.time()
 
-            # FFT（每隔 FFT_SKIP 帧发一次）
             fft_data = None
             if frame_count % FFT_SKIP == 0:
                 fft_data = await asyncio.to_thread(
                     compute_fft, frame, SAMPLE_RATE, 256, 4000.0
                 )
 
-            # ── 异常点过滤（置信度 + 跳变 + Debounce） ──────────
-            # smoother.feed() 通常返回 1 帧；debounce 确认时可能返回多帧
-            smoothed_frames = smoother.feed(raw_result)
+            for sess in list(_ws_clients.values()):
+                smoothed_frames = sess.smoother.feed(dict(raw_result))
 
-            for pitch_result in smoothed_frames:
-                frame_ts = pitch_result.pop("_ts", time.time())
+                first_frame = True
+                for pitch_result in smoothed_frames:
+                    frame_ts = pitch_result.pop("_ts", time.time())
 
-                # 构建消息（在此处序列化一次，分发字节串，避免多次 json.dumps）
-                msg: dict = {
-                    "type":       "pitch",
-                    "ts":         frame_ts,
-                    "freq":       pitch_result["freq"],
-                    "voiced":     pitch_result["voiced"],
-                    "confidence": pitch_result["confidence"],
-                    "rms":        pitch_result["rms"],
-                    "suppressed": pitch_result.get("suppressed"),
-                    "note_full":  None,
-                    "note":       None,
-                    "octave":     None,
-                    "cents":      None,
-                    "ref_freq":   None,
-                    "tune_level": None,
-                }
+                    msg: dict = {
+                        "type":       "pitch",
+                        "ts":         frame_ts,
+                        "freq":       pitch_result["freq"],
+                        "voiced":     pitch_result["voiced"],
+                        "confidence": pitch_result["confidence"],
+                        "rms":        pitch_result["rms"],
+                        "suppressed": pitch_result.get("suppressed"),
+                        "note_full":  None,
+                        "note":       None,
+                        "octave":     None,
+                        "cents":      None,
+                        "ref_freq":   None,
+                        "tune_level": None,
+                    }
 
-                if pitch_result["voiced"] and pitch_result["freq"] > 0:
-                    note_info = freq_to_note(pitch_result["freq"])
-                    if note_info:
-                        msg.update({
-                            "note_full":  note_info["note_full"],
-                            "note":       note_info["note"],
-                            "octave":     note_info["octave"],
-                            "cents":      note_info["cents"],
-                            "ref_freq":   note_info["ref_freq"],
-                            "tune_level": is_in_tune(note_info["cents"]),
-                        })
+                    if pitch_result["voiced"] and pitch_result["freq"] > 0:
+                        note_info = freq_to_note(pitch_result["freq"])
+                        if note_info:
+                            msg.update({
+                                "note_full":  note_info["note_full"],
+                                "note":       note_info["note"],
+                                "octave":     note_info["octave"],
+                                "cents":      note_info["cents"],
+                                "ref_freq":   note_info["ref_freq"],
+                                "tune_level": is_in_tune(note_info["cents"]),
+                            })
 
-                # FFT 只附到第一帧（避免重复传输）
-                if fft_data is not None:
-                    msg["fft"] = fft_data
-                    fft_data = None
+                    if fft_data is not None and first_frame:
+                        msg["fft"] = fft_data
+                        first_frame = False
 
-                # JSON 序列化移出事件循环（防止大 payload 阻塞调度）
-                payload = await asyncio.to_thread(json.dumps, msg)
-
-                # 广播给所有已注册队列
-                for q in list(_ws_clients):
+                    payload = await asyncio.to_thread(json.dumps, msg)
                     try:
-                        q.put_nowait(payload)
+                        sess.queue.put_nowait(payload)
                     except asyncio.QueueFull:
-                        pass  # 客户端消费太慢时静默丢帧，保护广播循环
+                        pass
 
         except asyncio.CancelledError:
             break
@@ -174,77 +179,77 @@ async def _pitch_broadcast_loop():
             await asyncio.sleep(0.1)
 
 
-# ── 生命周期 ──────────────────────────────────────────────
+# ── Lifespan ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop = asyncio.get_running_loop()
+    global _analysis_executor
 
-    # 确保上传目录存在
     UPLOAD_DIR.mkdir(exist_ok=True)
 
-    # 预热 librosa numba JIT（消除首帧延迟）
     await asyncio.to_thread(warmup, SAMPLE_RATE, CHUNK_SIZE)
 
-    # 启动麦克风采集
-    capture.start(loop)
+    _analysis_executor = ProcessPoolExecutor(
+        max_workers=WORKER_PROCESSES,
+        initializer=worker_init,
+        initargs=(SAMPLE_RATE, CHUNK_SIZE),
+        mp_context=mp.get_context("spawn"),
+    )
 
-    # 启动单生产者广播循环
+    capture.start(asyncio.get_running_loop())
     broadcast_task = asyncio.create_task(_pitch_broadcast_loop(), name="pitch-broadcast")
+
+    ip = _get_local_ip()
+    logger.info(f"服务已启动 — 局域网访问地址: http://{ip}:8000")
 
     yield
 
-    # 清理
     broadcast_task.cancel()
     try:
         await broadcast_task
     except asyncio.CancelledError:
         pass
     capture.stop()
-    _analysis_executor.shutdown(wait=False)
+    if _analysis_executor:
+        _analysis_executor.shutdown(wait=False)
 
 
-app = FastAPI(title="Vocal Tuner", lifespan=lifespan)
+# ── App ───────────────────────────────────────────────────
+app = FastAPI(title="Vocal Tuner", version="2.0.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ── 静态文件 ──────────────────────────────────────────────
-if FRONTEND_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
-
-# 上传音频文件目录（运行时挂载，确保目录存在后才能挂载）
+# ── Static files ──────────────────────────────────────────
 UPLOAD_DIR.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+_assets_src = STATIC_DIR / "assets"
+if _assets_src.exists():
+    app.mount("/assets", StaticFiles(directory=str(_assets_src)), name="assets")
 
 
 @app.get("/")
 async def serve_index():
-    index = FRONTEND_DIR / "index.html"
-    if index.exists():
-        return FileResponse(str(index))
-    return JSONResponse({"error": "frontend/index.html 不存在"}, status_code=404)
+    for d in [STATIC_DIR, LEGACY_DIR]:
+        idx = d / "index.html"
+        if idx.exists():
+            return FileResponse(str(idx))
+    return JSONResponse({"error": "index.html 不存在，请先运行 npm run build"}, status_code=404)
 
 
-@app.get("/js/{path:path}")
-async def serve_js(path: str):
-    file = FRONTEND_DIR / "js" / path
-    if file.exists():
-        return FileResponse(str(file))
-    return JSONResponse({"error": "文件不存在"}, status_code=404)
+# NOTE: This catch-all must come AFTER all /api routes
+# It is registered after the API routes so FastAPI matching order works correctly.
 
 
-@app.get("/css/{path:path}")
-async def serve_css(path: str):
-    file = FRONTEND_DIR / "css" / path
-    if file.exists():
-        return FileResponse(str(file))
-    return JSONResponse({"error": "文件不存在"}, status_code=404)
-
-
-# ── REST 控制 API ─────────────────────────────────────────
+# ── REST — control ────────────────────────────────────────
 @app.post("/api/pause")
 async def pause():
     global is_paused
     is_paused = True
-    logger.info("推送已暂停")
     return {"status": "paused"}
 
 
@@ -252,14 +257,13 @@ async def pause():
 async def resume():
     global is_paused
     is_paused = False
-    logger.info("推送已恢复")
     return {"status": "recording"}
 
 
 @app.get("/api/status")
 async def get_status():
-    devices     = capture.list_devices()
-    active_dev  = next((d for d in devices if d["is_active"]), None)
+    devices    = capture.list_devices()
+    active_dev = next((d for d in devices if d["is_active"]), None)
     return {
         "paused":         is_paused,
         "connections":    len(_ws_clients),
@@ -269,8 +273,13 @@ async def get_status():
     }
 
 
+@app.get("/api/server-info")
+async def server_info():
+    return {"local_ip": _get_local_ip(), "port": 8000}
+
+
 class DeviceRequest(BaseModel):
-    device_id: int | None = None  # None = 系统默认
+    device_id: Optional[int] = None
 
 
 @app.post("/api/device")
@@ -279,10 +288,8 @@ async def switch_device(req: DeviceRequest):
     try:
         await asyncio.to_thread(capture.switch_device, loop, req.device_id)
         dev_name = capture._get_device_name(req.device_id)
-        logger.info(f"切换设备 → {dev_name}")
         return {"status": "ok", "device_id": req.device_id, "device_name": dev_name}
     except Exception as e:
-        logger.error(f"切换设备失败：{e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
 
 
@@ -292,23 +299,46 @@ async def list_devices():
     return {"devices": devices}
 
 
-# ── 歌曲分析 API ──────────────────────────────────────────
+# ── REST — library ────────────────────────────────────────
+@app.get("/api/library")
+async def list_library():
+    songs = await asyncio.to_thread(store.list_all)
+    return {"songs": songs}
 
+
+@app.get("/api/library/{job_id}")
+async def get_library_item(job_id: str):
+    data = await asyncio.to_thread(store.load, job_id)
+    if data is None:
+        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
+    data["audio_url"] = f"/uploads/{data.get('filename', '')}"
+    return data
+
+
+@app.delete("/api/library/{job_id}")
+async def delete_library_item(job_id: str):
+    ok = store.delete(job_id, UPLOAD_DIR)
+    if not ok:
+        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
+    _jobs.pop(job_id, None)
+    return {"status": "deleted", "job_id": job_id}
+
+
+# ── REST — analysis ───────────────────────────────────────
 @app.post("/api/analyze")
 async def upload_and_analyze(file: UploadFile = File(...)):
-    """上传音频文件，触发后台两阶段分析，立即返回 job_id。"""
-    # 生成唯一 job id 与安全文件名
     job_id    = str(uuid.uuid4())[:8]
     suffix    = Path(file.filename or "audio").suffix.lower() or ".mp3"
     safe_name = f"{job_id}{suffix}"
     filepath  = UPLOAD_DIR / safe_name
 
-    # 保存上传文件（在线程中执行，避免大文件写盘阻塞事件循环）
     def _save_upload():
         with filepath.open("wb") as f:
             shutil.copyfileobj(file.file, f)
 
     await asyncio.to_thread(_save_upload)
+
+    progress_val = mp.Value("d", 0.0)
 
     _jobs[job_id] = {
         "status":        "analyzing",
@@ -319,7 +349,8 @@ async def upload_and_analyze(file: UploadFile = File(...)):
         "fine_pitches":  None,
         "rms":           None,
         "error":         None,
-        "progress":      0.0,   # 0.0 ~ 1.0，分段分析时逐步更新
+        "progress":      0.0,
+        "_progress_val": progress_val,
     }
 
     logger.info(f"[Analyze] 任务 {job_id} 开始，文件：{file.filename}")
@@ -327,28 +358,27 @@ async def upload_and_analyze(file: UploadFile = File(...)):
     async def _run_analysis():
         loop = asyncio.get_running_loop()
         try:
-            # 进度回调：在分析线程中调用，通过 call_soon_threadsafe 安全更新 _jobs
-            def _on_progress(pct: float):
-                job = _jobs.get(job_id)
-                if job:
-                    job["progress"] = round(pct, 3)
-                    loop.call_soon_threadsafe(lambda: None)  # 唤醒事件循环（可选）
+            poll_task = asyncio.create_task(_poll_progress(job_id, progress_val))
 
-            # 运行在独立线程池，不占用 detect_pitch 的默认线程池
             result = await loop.run_in_executor(
                 _analysis_executor,
-                analyze_audio_file,
+                analyze_task,
                 str(filepath),
-                _on_progress,
+                progress_val,
             )
+
+            poll_task.cancel()
+
             job = _jobs.get(job_id)
             if job:
                 job["status"]       = "done"
                 job["fine_pitches"] = result["fine_pitches"]
                 job["duration"]     = result["duration"]
                 job["rms"]          = result["rms"]
+                job["progress"]     = 1.0
                 job["completed_at"] = time.time()
-                logger.info(f"[Analyze] {job_id} 分析完成，duration={result['duration']:.1f}s")
+                logger.info(f"[Analyze] {job_id} 完成，duration={result['duration']:.1f}s")
+
                 save_payload = {
                     "original_name": job["original_name"],
                     "filename":      job["filename"],
@@ -358,10 +388,9 @@ async def upload_and_analyze(file: UploadFile = File(...)):
                     "rms":           job["rms"],
                     "fine_pitches":  job["fine_pitches"],
                 }
-                # JSON 序列化 + 写盘均在独立线程执行，不阻塞事件循环
                 await asyncio.to_thread(store.save, job_id, save_payload)
         except Exception as e:
-            logger.error(f"[Analyze] {job_id} 失败：{e}")
+            logger.error(f"[Analyze] {job_id} 失败：{e}", exc_info=True)
             job = _jobs.get(job_id)
             if job:
                 job["status"]       = "error"
@@ -378,43 +407,20 @@ async def upload_and_analyze(file: UploadFile = File(...)):
     }
 
 
-
-@app.get("/api/library")
-async def list_library():
-    """返回所有已持久化歌曲的元数据列表（不含 pitches）。"""
-    songs = await asyncio.to_thread(store.list_all)
-    return {"songs": songs}
-
-
-@app.get("/api/library/{job_id}")
-async def get_library_item(job_id: str):
-    """返回完整歌曲数据（含 fine_pitches / rms），用于跟唱模式加载。"""
-    data = await asyncio.to_thread(store.load, job_id)
-    if data is None:
-        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
-    data["audio_url"] = f"/uploads/{data.get('filename', '')}"
-    return data
-
-
-@app.delete("/api/library/{job_id}")
-async def delete_library_item(job_id: str):
-    """删除歌曲记录及对应音频文件。"""
-    ok = store.delete(job_id, UPLOAD_DIR)
-    if not ok:
-        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
-    # 同时从内存 job 表清理（若分析任务还在）
-    _jobs.pop(job_id, None)
-    return {"status": "deleted", "job_id": job_id}
+async def _poll_progress(job_id: str, progress_val: mp.Value):
+    while True:
+        await asyncio.sleep(PROGRESS_POLL_MS / 1000)
+        job = _jobs.get(job_id)
+        if not job or job["status"] != "analyzing":
+            break
+        try:
+            job["progress"] = round(progress_val.value, 3)
+        except Exception:
+            pass
 
 
 @app.get("/api/analyze/{job_id}")
 async def get_analysis(job_id: str):
-    """查询分析任务进度。
-    status 枚举：analyzing | done | error
-    done 时返回 fine_pitches、duration、rms。
-    服务重启后退回查询持久化 Store。
-    """
-    # ── TTL 清理：移除已完成超过 JOB_TTL_SECONDS 的内存条目 ──
     now_ts = time.time()
     stale = [
         jid for jid, j in list(_jobs.items())
@@ -426,7 +432,6 @@ async def get_analysis(job_id: str):
 
     job = _jobs.get(job_id)
 
-    # ── 服务重启后内存无记录：降级查持久化 Store ──────────────
     if job is None:
         meta = await asyncio.to_thread(store.load, job_id)
         if meta is None:
@@ -450,53 +455,58 @@ async def get_analysis(job_id: str):
         "audio_url":     f"/uploads/{job['filename']}",
         "progress":      job.get("progress", 0.0),
     }
-
-    # 轮询接口仅返回进度状态和元数据，不包含 pitch 数据体（避免大量 JSON 序列化阻塞事件循环）
-    # 需要 fine_pitches 请调用 GET /api/library/{job_id}
     if job["status"] == "error":
-        resp["error"] = job["error"]
+        resp["error"] = job.get("error")
 
     return resp
 
 
-# ── WebSocket 端点 ────────────────────────────────────────
+# ── WebSocket ─────────────────────────────────────────────
 @app.websocket("/ws/pitch")
 async def websocket_pitch(ws: WebSocket):
     await ws.accept()
 
-    # 为每个连接创建私有队列；广播循环向此队列投递序列化好的 JSON 字节串
-    q: asyncio.Queue[str] = asyncio.Queue(maxsize=10)
-    _ws_clients.add(q)
-    logger.info(f"WebSocket 连接：{ws.client}（当前 {len(_ws_clients)} 个连接）")
+    client_id = str(uuid.uuid4())[:8]
+    session   = ClientSession()
+    _ws_clients[client_id] = session
+    logger.info(f"WebSocket 连接 [{client_id}]（共 {len(_ws_clients)} 个）")
 
-    # 发送初始状态
     await ws.send_text(json.dumps({
-        "type": "status",
-        "state": "paused" if is_paused else "recording",
+        "type":        "status",
+        "state":       "paused" if is_paused else "recording",
         "sample_rate": SAMPLE_RATE,
     }))
 
     try:
         while True:
-            # 等待广播循环投递数据，带超时防止永久阻塞
             try:
-                payload = await asyncio.wait_for(q.get(), timeout=2.0)
+                payload = await asyncio.wait_for(session.queue.get(), timeout=2.0)
             except asyncio.TimeoutError:
-                # 超时但连接还活着：发一个心跳
                 await ws.send_text(json.dumps({"type": "heartbeat", "ts": time.time()}))
                 continue
             await ws.send_text(payload)
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket 断开：{ws.client}")
+        logger.info(f"WebSocket 断开 [{client_id}]")
     except Exception as e:
-        logger.error(f"WebSocket 异常：{e}")
+        logger.error(f"WebSocket 异常 [{client_id}]：{e}")
     finally:
-        _ws_clients.discard(q)
-        # 最后一个客户端断开时重置 smoother 状态，
-        # 防止残留 debounce 缓存污染下一次连接
-        if not _ws_clients:
-            smoother.reset()
+        _ws_clients.pop(client_id, None)
+        session.smoother.reset()
+
+
+# ── SPA fallback (must be last) ───────────────────────────
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    for d in [STATIC_DIR, LEGACY_DIR]:
+        f = d / path
+        if f.exists() and f.is_file():
+            return FileResponse(str(f))
+    for d in [STATIC_DIR, LEGACY_DIR]:
+        idx = d / "index.html"
+        if idx.exists():
+            return FileResponse(str(idx))
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 if __name__ == "__main__":
