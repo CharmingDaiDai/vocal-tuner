@@ -223,7 +223,9 @@ export class PitchHistory {
     this._viewMax += (this._targetMax - this._viewMax) * LERP;
 
     const plotW    = W - LABEL_W;
-    const winStart = now - WINDOW_SEC;
+    // 先留 2s 空白，让最新数据离右边有一点呀吱感
+    const AHEAD_SEC = 2;
+    const winStart   = now - WINDOW_SEC + AHEAD_SEC;
     const vMin     = this._viewMin;
     const vMax     = this._viewMax;
     const range    = vMax - vMin;
@@ -253,13 +255,16 @@ export class PitchHistory {
       // ── 4. 水平色块轨迹 ─────────────────────────────────
       this._drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi);
 
-      // ── 5. 当前音高发光指示器 ────────────────────────────
-      const last = [...pts].reverse().find(p => p.voiced && p.midi !== null);
-      if (last) this._drawCurrentIndicator(ctx, last, tsToX, midiToY, W, H);
+      // ── 5. 最近 4 个有声帧拖尾指示器 ──────────────────
+      const recentVoiced = [];
+      for (let i = pts.length - 1; i >= 0 && recentVoiced.length < 4; i--) {
+        if (pts[i].voiced && pts[i].midi !== null) recentVoiced.push(pts[i]);
+      }
+      if (recentVoiced.length > 0) this._drawCurrentIndicator(ctx, recentVoiced, tsToX, midiToY, W, H);
     }
 
-    // ── 6. 播放头（最右侧"现在"竖虚线）──────────────────
-    const headX = LABEL_W + plotW - 1;
+    // ── 6. 播放头（‘2s 前“现在”竖虚线）─────────────
+    const headX = Math.round(tsToX(now));
     ctx.save();
     ctx.strokeStyle = 'rgba(255,255,255,0.18)';
     ctx.lineWidth   = 1;
@@ -476,28 +481,45 @@ export class PitchHistory {
   }
 
   // ────────────────────────────────────────────────────────
-  //  当前音高发光指示器（右侧最新音名 + 音分偏差 + 光晕）
+  //  当前音高发光指示器（最近几个帧拖尾，newest-first 数组）
   // ────────────────────────────────────────────────────────
-  _drawCurrentIndicator(ctx, last, tsToX, midiToY, W, H) {
+  _drawCurrentIndicator(ctx, recentVoiced, tsToX, midiToY, W, H) {
+    // recentVoiced[0] = 最新，[n-1] = 最旧
+    const last  = recentVoiced[0];
     const x     = tsToX(last.ts);
     const y     = midiToY(last.midi);
     const color = _tuneColor(last.cents);
-    const r     = 7;
 
     ctx.save();
 
-    // 水平辅助线（极淡，贯穿全宽，连接左侧标签与当前音高）
+    // ── 拖尾（从旧到新，越旧越小越透明）──────────────────
+    for (let i = recentVoiced.length - 1; i >= 1; i--) {
+      const p      = recentVoiced[i];
+      const frac   = 1 - i / recentVoiced.length; // 0(最旧)→接近1(次新)
+      const alpha  = 0.15 + frac * 0.35;
+      const radius = 2 + frac * 3;
+      const pc     = _tuneColor(p.cents);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle   = pc;
+      ctx.beginPath();
+      ctx.arc(tsToX(p.ts), midiToY(p.midi), radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // ── 贯穿全宽极淡辅助水平线 ────────────────────────────
     ctx.strokeStyle = color;
     ctx.globalAlpha = 0.12;
     ctx.lineWidth   = 1;
     ctx.setLineDash([]);
     ctx.beginPath();
-    ctx.moveTo(0, y);
+    ctx.moveTo(LABEL_W, y);
     ctx.lineTo(W, y);
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // 外光晕
+    // ── 外光晕 ────────────────────────────────────────────
+    const r   = 7;
     const grd = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 3.5);
     grd.addColorStop(0, color + 'cc');
     grd.addColorStop(1, color + '00');
@@ -506,32 +528,28 @@ export class PitchHistory {
     ctx.arc(x, y, r * 3.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // 实心圆点
+    // ── 实心圆点 ──────────────────────────────────────────
     ctx.shadowColor = color;
     ctx.shadowBlur  = 10;
     ctx.fillStyle   = color;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
+    ctx.shadowBlur  = 0;
 
-    ctx.shadowBlur = 0;
-
-    // 音名 + 音分偏差标注（右侧浮动）
+    // ── 音名 + 音分偏差标注 ───────────────────────────────
     const centsStr = last.cents != null
       ? ` ${last.cents >= 0 ? '+' : ''}${last.cents.toFixed(0)}¢`
       : '';
-    const label = (last.note_full ?? '') + centsStr;
+    const label  = (last.note_full ?? '') + centsStr;
     const labelX = Math.min(x + r + 6, W - 4);
 
     ctx.font         = 'bold 13px "Segoe UI", monospace';
     ctx.textBaseline = 'middle';
     ctx.textAlign    = 'left';
-
-    // 文字阴影背景
-    ctx.fillStyle    = 'rgba(13,17,23,0.8)';
     const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(13,17,23,0.8)';
     ctx.fillRect(labelX - 2, y - 9, tw + 6, 18);
-
     ctx.fillStyle = color;
     ctx.fillText(label, labelX, y);
 
