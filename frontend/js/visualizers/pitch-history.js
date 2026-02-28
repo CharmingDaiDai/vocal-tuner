@@ -32,6 +32,11 @@ export class PitchHistory {
     // 自动跟随当前音高
     this._autoFollow = true;
 
+    // 参考轨（歌曲分析结果）
+    this._refPitches  = [];    // [{t, midi, voiced, cents, note_full}...]
+    this._wallStart   = null;  // 歌曲开始播放时的 wall-clock 时间戳（秒）
+    this._compareMode = 'overlay'; // 'overlay' 叠加 | 'split' 上下分离
+
     // Y 轴可视范围（MIDI 浮点，lerp 插值）
     this._viewMin    = MIDI_MIN_DEFAULT;
     this._viewMax    = MIDI_MAX_DEFAULT;
@@ -79,6 +84,32 @@ export class PitchHistory {
   }
 
   setPaused(v) { this._paused = v; }
+
+  /**
+   * 加载参考轨（歌曲分析结果），pitches 中的 t 字段为歌曲内相对时间（秒）
+   * 渲染时对应 wallStart + t 的 wall-clock 时间戳
+   */
+  setReferenceTrack(pitches) {
+    this._refPitches = (pitches || []).map(p => ({
+      ts:       null,   // 延迟计算（需要 _wallStart）
+      t:        p.t,
+      midi:     p.midi ?? _freqToMidi(p.freq ?? 0),
+      voiced:   p.voiced,
+      cents:    p.cents ?? 0,
+      note_full: p.note_full ?? '',
+    }));
+  }
+
+  /** 设置歌曲开始播放的 wall-clock 时间（秒），用于参考轨与麦克风时间对齐 */
+  setPlaybackWallStart(wallTs) {
+    this._wallStart = wallTs;
+  }
+
+  /** 设置对比模式：'overlay'（叠加）| 'split'（上下分离） */
+  setCompareMode(mode) {
+    this._compareMode = mode;
+  }
+  get compareMode() { return this._compareMode; }
 
   /** 重置 Y 轴缩放 */
   resetZoom() {
@@ -179,11 +210,61 @@ export class PitchHistory {
 
     const tsToX = (ts) => LABEL_W + ((ts - winStart) / WINDOW_SEC) * plotW;
 
-    // 根据风格分派绘制
-    if (this._style === 'bar') {
-      this._drawBars(ctx, pts, tsToX, midiToY, H);
+    if (this._compareMode === 'split' && this._refPitches.length > 0 && this._wallStart != null) {
+      // ── 上下分离模式 ─────────────────────────────────────
+      const halfH = H / 2;
+      // 上半部分（参考轨）midiToY
+      const midiToYRef = (m) => halfH - ((m - vMin) / range) * halfH;
+      // 下半部分（麦克风轨）midiToY
+      const midiToYMic = (m) => H   - ((m - vMin) / range) * halfH;
+
+      // 上半区绘制参考轨
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, halfH);
+      ctx.clip();
+      this._drawRefOverlay(ctx, winStart, tsToX, midiToYRef, W, halfH);
+      ctx.restore();
+
+      // 分隔线
+      ctx.save();
+      ctx.strokeStyle = '#30363d';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(LABEL_W, halfH);
+      ctx.lineTo(W, halfH);
+      ctx.stroke();
+      ctx.restore();
+
+      // 下半区绘制麦克风轨
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, halfH, W, halfH);
+      ctx.clip();
+      if (this._style === 'bar') {
+        this._drawBars(ctx, pts, tsToX, midiToYMic, halfH);
+      } else {
+        this._drawDots(ctx, pts, tsToX, midiToYMic);
+      }
+      ctx.restore();
+
+      // 区域标签
+      ctx.font         = '10px "Segoe UI"';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = 'rgba(88,166,255,0.7)';
+      ctx.fillText('参考', LABEL_W + 4, 2);
+      ctx.fillStyle    = 'rgba(63,185,80,0.7)';
+      ctx.fillText('麦克风', LABEL_W + 4, halfH + 2);
     } else {
-      this._drawDots(ctx, pts, tsToX, midiToY);
+      // ── 叠加模式（默认）────────────────────────────────────
+      this._drawRefOverlay(ctx, winStart, tsToX, midiToY, W, H);
+      if (this._style === 'bar') {
+        this._drawBars(ctx, pts, tsToX, midiToY, H);
+      } else {
+        this._drawDots(ctx, pts, tsToX, midiToY);
+      }
     }
 
     // ── 最新音名标注 ─────────────────────────────────────
@@ -368,6 +449,61 @@ export class PitchHistory {
       ctx.fillStyle = color;
       ctx.fill();
     }
+  }
+
+  /** 叠加模式：在麦克风轨之前绘制半透明参考轨 */
+  _drawRefOverlay(ctx, winStart, tsToX, midiToY, W, H) {
+    if (this._refPitches.length === 0 || this._wallStart == null) return;
+    const pts = this._refPitches
+      .filter(p => p.voiced && p.midi != null)
+      .map(p => ({ ...p, ts: this._wallStart + p.t }))
+      .filter(p => p.ts >= winStart && p.ts <= winStart + WINDOW_SEC);
+    if (pts.length === 0) return;
+
+    const range      = this._viewMax - this._viewMin;
+    const pixPerMidi = H / range;
+    const barH       = Math.max(4, pixPerMidi * 0.68);
+    const style      = this._style;
+
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+
+    if (style === 'bar') {
+      for (let i = 0; i < pts.length; i++) {
+        const p    = pts[i];
+        const x    = tsToX(p.ts);
+        const y    = midiToY(p.midi);
+        const next = pts[i + 1];
+        const barW = (next && (next.ts - p.ts) < 0.35)
+          ? (tsToX(next.ts) - x + 1)
+          : Math.max(6, pixPerMidi * 0.5);
+        ctx.beginPath();
+        ctx.roundRect(x, y - barH / 2, Math.max(3, barW), barH, barH / 2);
+        ctx.fillStyle = 'rgba(88,166,255,0.9)';
+        ctx.fill();
+      }
+    } else {
+      let prevX = null, prevY = null;
+      for (const p of pts) {
+        const x = tsToX(p.ts);
+        const y = midiToY(p.midi);
+        if (prevX !== null) {
+          ctx.beginPath();
+          ctx.moveTo(prevX, prevY);
+          ctx.lineTo(x, y);
+          ctx.strokeStyle = 'rgba(88,166,255,0.9)';
+          ctx.lineWidth   = 2;
+          ctx.lineCap     = 'round';
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(88,166,255,0.9)';
+        ctx.fill();
+        prevX = x; prevY = y;
+      }
+    }
+    ctx.restore();
   }
 
   /** 切换绘制风格，返回当前风格 */
