@@ -3,266 +3,75 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Vocal Tuner — 实时音准检测</title>
+  <title>Vocal Tuner</title>
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
 <div id="app">
 
-  <!-- ── Header ─────────────────────────────────────────── -->
-  <header id="header">
-    <h1>🎤 Vocal Tuner <span>实时音准检测</span></h1>
+  <!-- ── 左侧导航栏 ──────────────────────────────────── -->
+  <nav id="sidebar">
+    <div class="nav-logo" title="Vocal Tuner">🎤</div>
 
-    <div class="ctrl-group">
-      <div class="conn-dot" id="conn-dot"></div>
-      <span id="conn-label" style="font-size:12px;color:var(--text-muted)">连接中...</span>
-    </div>
-    <!-- 麦克风设备选择器 -->
-    <div class="ctrl-group" id="device-group">
-      <label for="mic-select" style="font-size:12px;color:var(--text-muted);white-space:nowrap">🎧 麦克风</label>
-      <select id="mic-select" class="mic-select" title="选择麦克风设备">
-        <option value="">加载中...</option>
-      </select>
-      <span id="device-status" class="device-status"></span>
-    </div>
-    <div class="ctrl-group">
-      <button class="btn btn-start"  id="btn-start"  title="开始采集">▶ 开始</button>
-      <button class="btn btn-pause"  id="btn-pause"  title="暂停采集" disabled>⏸ 暂停</button>
-      <button class="btn btn-export" id="btn-export" title="导出 CSV">💾 导出 CSV</button>
-    </div>
-  </header>
+    <a class="nav-item" id="nav-home"    href="#home"    title="实时音准">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">音准</span>
+    </a>
+    <a class="nav-item" id="nav-library" href="#library" title="音乐分析库">
+      <span class="nav-icon">🎵</span>
+      <span class="nav-label">曲库</span>
+    </a>
+    <a class="nav-item" id="nav-karaoke" href="#karaoke" title="跟唱模式">
+      <span class="nav-icon">🎤</span>
+      <span class="nav-label">跟唱</span>
+    </a>
+  </nav>
 
-  <!-- ── Main 4-panel grid ──────────────────────────────── -->
-  <main id="main">
-    <!-- 面板 1：指针调音表（左上，占满左列）-->
-    <div class="panel" style="grid-row: 1 / 3;">
-      <div class="panel-title">调音表 · 实时音准</div>
-      <canvas id="canvas-needle"></canvas>
-    </div>
-
-    <!-- 面板 2：音高历史时间轴（右上）-->
-    <div class="panel" id="panel-history">
-      <div class="panel-title">
-        音高历史 · 30 秒
-        <span class="panel-tools">
-          <button class="panel-btn" id="btn-zoom-in"    title="放大音域（滚轮可缩放）">＋</button>
-          <button class="panel-btn" id="btn-zoom-out"   title="缩小音域">－</button>
-          <button class="panel-btn" id="btn-zoom-reset" title="重置缩放">⊡</button>          <button class="panel-btn active" id="btn-style"  title="切换风格：点线 / 柱状">点线</button>
-          <button class="panel-btn active" id="btn-follow" title="自动跟随音高">跟随</button>          <button class="panel-btn" id="btn-expand"     title="全屏展开">⛶</button>
-        </span>
-      </div>
-      <canvas id="canvas-history"></canvas>
-    </div>
-
-    <!-- 面板 3：钢琴键盘（右中上）-->
-    <div class="panel" style="display:grid;grid-template-rows:auto 1fr;">
-      <div class="panel-title">钢琴键盘 · C3–B5</div>
-      <!-- 钢琴键盘 + FFT 上下分割 -->
-      <div style="display:grid;grid-template-rows:55% 45%;min-height:0;height:100%;">
-        <canvas id="canvas-piano"></canvas>
-        <div style="border-top:1px solid var(--border);display:flex;flex-direction:column;min-height:0;">
-          <div class="panel-title" style="border:none;padding-top:6px;">FFT 频谱</div>
-          <canvas id="canvas-fft" style="flex:1;min-height:0;"></canvas>
-        </div>
-      </div>
-    </div>
-  </main>
-
-  <!-- ── Footer / Status bar ────────────────────────────── -->
-  <footer id="footer">
-    <span>采样率: 44100 Hz</span>
-    <span id="status-text">等待连接...</span>
-    <span id="fps-text" style="margin-left:auto;"></span>
-    <span id="frame-count" style="color:var(--text-muted);"></span>
-  </footer>
+  <!-- ── 页面内容区（路由挂载点）──────────────────────── -->
+  <div id="page-root"></div>
 
 </div>
 
 <script type="module">
-import { initWsClient, addListener, sendPause, sendResume, isPaused } from '/js/ws-client.js';
-import { recordPitch, exportCSV, clearHistory }                       from '/js/recorder.js';
-import { NeedleMeter }   from '/js/visualizers/needle-meter.js';
-import { PitchHistory }  from '/js/visualizers/pitch-history.js';
-import { Piano }         from '/js/visualizers/piano.js';
-import { FftSpectrum }   from '/js/visualizers/fft-spectrum.js';
+import { initWsClient }  from '/js/ws-client.js';
+import * as router       from '/js/router.js';
+import * as homeP        from '/js/pages/page-home.js';
+import * as libraryP     from '/js/pages/page-library.js';
+import * as karaokeP     from '/js/pages/page-karaoke.js';
 
-// ── 初始化可视化模块 ─────────────────────────────────────
-const needle  = new NeedleMeter (document.getElementById('canvas-needle'));
-const history = new PitchHistory(document.getElementById('canvas-history'));
-const piano   = new Piano       (document.getElementById('canvas-piano'));
-const fft     = new FftSpectrum (document.getElementById('canvas-fft'));
+// ── WebSocket 单例（跨页面保持连接）──────────────────────
+initWsClient();
 
-// ── FPS 计数器 ───────────────────────────────────────────
-let _frameCount = 0;
-let _lastFpsTick = Date.now();
-const fpsEl   = document.getElementById('fps-text');
-const frmcEl  = document.getElementById('frame-count');
+// ── 注册路由 ──────────────────────────────────────────────
+const navItems = {
+  home:    document.getElementById('nav-home'),
+  library: document.getElementById('nav-library'),
+  karaoke: document.getElementById('nav-karaoke'),
+};
 
-function tickFPS() {
-  _frameCount++;
-  const now = Date.now();
-  if (now - _lastFpsTick >= 1000) {
-    fpsEl.textContent = `${_frameCount} msg/s`;
-    _frameCount = 0;
-    _lastFpsTick = now;
+router.register('home',    homeP);
+router.register('library', libraryP);
+router.register('karaoke', karaokeP);
+
+// ── 导航栏高亮 + 跟唱全屏处理 ─────────────────────────────
+function onNavigate(pageName) {
+  const sidebar = document.getElementById('sidebar');
+  const appEl   = document.getElementById('app');
+  if (pageName === 'karaoke') {
+    sidebar?.classList.add('hidden-karaoke');
+    appEl?.classList.add('karaoke-mode');
+  } else {
+    sidebar?.classList.remove('hidden-karaoke');
+    appEl?.classList.remove('karaoke-mode');
+  }
+  for (const [name, el] of Object.entries(navItems)) {
+    el?.classList.toggle('active', name === pageName);
   }
 }
 
-// ── WebSocket 数据分发 ────────────────────────────────────
-addListener((msg) => {
-  if (msg.type !== 'pitch') return;
-  tickFPS();
-  needle .update(msg);
-  history.update(msg);
-  piano  .update(msg);
-  fft    .update(msg);
-  recordPitch(msg);
-
-  // 状态栏
-  const statusEl = document.getElementById('status-text');
-  if (msg.voiced) {
-    statusEl.textContent =
-      `音符: ${msg.note_full}  频率: ${msg.freq?.toFixed(1)} Hz  偏差: ${msg.cents >= 0 ? '+' : ''}${msg.cents?.toFixed(1)}¢  置信度: ${(msg.confidence * 100).toFixed(0)}%`;
-  } else {
-    statusEl.textContent = '静音 / 未检出音高';
-  }
-});
-
-// ── 初始化 WebSocket 客户端 ───────────────────────────────
-initWsClient({
-  dotEl:   document.getElementById('conn-dot'),
-  labelEl: document.getElementById('conn-label'),
-  statusEl:document.getElementById('status-text'),
-});
-
-// ── 按钮逻辑 ─────────────────────────────────────────────
-const btnStart  = document.getElementById('btn-start');
-const btnPause  = document.getElementById('btn-pause');
-const btnExport = document.getElementById('btn-export');
-
-let _started = false;
-
-btnStart.addEventListener('click', async () => {
-  if (!_started) {
-    // 首次点击：恢复（服务启动时默认 recording 状态，点开始保持一致）
-    await sendResume();
-    _started = true;
-    btnStart.disabled = true;
-    btnPause.disabled = false;
-    history.setPaused(false);
-  }
-});
-
-btnPause.addEventListener('click', async () => {
-  if (!isPaused()) {
-    await sendPause();
-    btnPause.textContent = '▶ 恢复';
-    btnPause.classList.replace('btn-pause', 'btn-start');
-    history.setPaused(true);
-  } else {
-    await sendResume();
-    btnPause.textContent = '⏸ 暂停';
-    btnPause.classList.replace('btn-start', 'btn-pause');
-    history.setPaused(false);
-  }
-});
-
-btnExport.addEventListener('click', () => exportCSV());
-
-// ── 麦克风设备选择 ────────────────────────────────────────
-(async function loadDevices() {
-  const sel    = document.getElementById('mic-select');
-  const status = document.getElementById('device-status');
-  let devices = [];
-  try {
-    const res = await fetch('/api/devices');
-    const data = await res.json();
-    devices = data.devices ?? [];
-  } catch {
-    sel.innerHTML = '<option value="">获取失败</option>';
-    return;
-  }
-  sel.innerHTML = '';
-  for (const d of devices) {
-    const opt = document.createElement('option');
-    opt.value = d.id;
-    opt.textContent = (d.is_default ? '★ ' : '') + d.name + (d.channels > 1 ? ` (${d.channels}ch)` : '');
-    if (d.is_active) opt.selected = true;
-    sel.appendChild(opt);
-  }
-  if (devices.length === 0) {
-    sel.innerHTML = '<option value="">无可用设备</option>';
-  }
-}());
-
-const micSel    = document.getElementById('mic-select');
-const devStatus = document.getElementById('device-status');
-
-micSel.addEventListener('change', async () => {
-  const deviceId = micSel.value === '' ? null : parseInt(micSel.value, 10);
-  devStatus.textContent = '切换中...';
-  devStatus.className   = 'device-status switching';
-  micSel.disabled = true;
-  try {
-    const res  = await fetch('/api/device', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ device_id: deviceId }),
-    });
-    const data = await res.json();
-    if (data.status === 'ok') {
-      devStatus.textContent = `✓ ${data.device_name}`;
-      devStatus.className   = 'device-status ok';
-    } else {
-      devStatus.textContent = `⚠ ${data.message}`;
-      devStatus.className   = 'device-status err';
-    }
-  } catch (e) {
-    devStatus.textContent = '⚠ 请求失败';
-    devStatus.className   = 'device-status err';
-  } finally {
-    micSel.disabled = false;
-    setTimeout(() => { devStatus.textContent = ''; devStatus.className = 'device-status'; }, 3000);
-  }
-});
-
-// ── 音高历史工具栏 ────────────────────────────────────────
-const panelHistory = document.getElementById('panel-history');
-
-document.getElementById('btn-zoom-in')   .addEventListener('click', () => history.zoomIn());
-document.getElementById('btn-zoom-out')  .addEventListener('click', () => history.zoomOut());
-document.getElementById('btn-zoom-reset').addEventListener('click', () => history.resetZoom());
-
-const btnStyle  = document.getElementById('btn-style');
-const btnFollow = document.getElementById('btn-follow');
-
-btnStyle.addEventListener('click', () => {
-  const style = history.toggleStyle();
-  btnStyle.textContent  = style === 'bar' ? '柱状' : '点线';
-  btnStyle.classList.toggle('active', true); // 始终保持 active 外观，文字带现状态
-});
-
-btnFollow.addEventListener('click', () => {
-  const next = !history.autoFollow;
-  history.setAutoFollow(next);
-  btnFollow.classList.toggle('active', next);
-});
-
-document.getElementById('btn-expand').addEventListener('click', () => {
-  const isExpanded = panelHistory.classList.toggle('expanded');
-  // Esc 键关闭
-  if (isExpanded) {
-    const onEsc = (e) => {
-      if (e.key === 'Escape') {
-        panelHistory.classList.remove('expanded');
-        document.removeEventListener('keydown', onEsc);
-      }
-    };
-    document.addEventListener('keydown', onEsc);
-  }
-});
-
-// ── 窗口大小调整：canvas 会在各自 draw 中自适应，无需额外处理 ──
+// ── 启动 ──────────────────────────────────────────────────
+router.init(document.getElementById('page-root'), onNavigate);
+router.start('home');
 </script>
 </body>
 </html>
