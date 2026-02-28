@@ -91,3 +91,7 @@ pitch-session-*.csv
 
 # 环境快照不忽略（environment.yml 应提交，方便复现环境）
 # environment.yml  ← 故意不忽略
+
+
+.vscode
+.claude
