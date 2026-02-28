@@ -43,7 +43,11 @@ class AudioCapture:
     def _callback(self, indata: np.ndarray, frames: int, time, status):
         """sounddevice 回调（在单独线程中执行）"""
         if status:
-            logger.warning(f"sounddevice 状态：{status}")
+            # InputOverflow 在 CPU 繁忙时（如歌曲分析期间）属正常现象，降为 DEBUG 避免刷屏
+            if status.input_overflow:
+                logger.debug(f"sounddevice input overflow（帧已丢弃）")
+            else:
+                logger.warning(f"sounddevice 状态：{status}")
 
         # 单声道：取第一通道
         mono = indata[:, 0].copy()
