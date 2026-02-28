@@ -253,7 +253,7 @@ export class PitchHistory {
       ctx.fillText('等待音频输入...', LABEL_W + plotW / 2, H / 2);
     } else {
       // ── 4. 水平色块轨迹 ─────────────────────────────────
-      this._drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi);
+      this._drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi, winStart);
 
       // ── 5. 最近 4 个有声帧拖尾指示器 ──────────────────
       const recentVoiced = [];
@@ -295,55 +295,72 @@ export class PitchHistory {
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, W, H);
 
-    // 绘制每个半音行（从视窗下边界到上边界）
     const mLo = Math.floor(this._viewMin) - 1;
     const mHi = Math.ceil(this._viewMax)  + 1;
+
+    // ── 第一遍：所有行画白键浅色底（包括黑键行位置也先画浅色） ──
+    // 这样 E-F、B-C 之间只有两个紧邻的浅色行，不会夹着深色条
     for (let m = mLo; m <= mHi; m++) {
       const ni  = ((m % 12) + 12) % 12;
       const isC = ni === 0;
-      const isBlack = BLACK_KEYS.has(ni);
 
       const yTop    = midiToY(m + 1);
       const yBottom = midiToY(m);
       const rowH    = yBottom - yTop;
       if (rowH <= 0) continue;
 
-      // 行底色
-      if (isBlack) {
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      } else if (isC) {
-        ctx.fillStyle = 'rgba(30,60,100,0.28)';
+      if (isC) {
+        ctx.fillStyle = 'rgba(30,60,100,0.30)';
       } else {
-        ctx.fillStyle = 'rgba(255,255,255,0.03)';
+        ctx.fillStyle = 'rgba(255,255,255,0.055)';
       }
       ctx.fillRect(LABEL_W, yTop, plotW, rowH);
 
-      // C 音行：加强蓝色左侧条
+      // C 音行：蓝色左侧条 + 蓝色分隔线
       if (isC) {
         ctx.fillStyle = 'rgba(56,139,253,0.45)';
         ctx.fillRect(LABEL_W, yTop, 3, rowH);
-      }
-
-      // 行分隔线
-      const oct = Math.floor(m / 12) - 1;
-      if (isC) {
         ctx.strokeStyle = 'rgba(56,139,253,0.35)';
         ctx.lineWidth   = 1;
-      } else if (!isBlack) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-        ctx.lineWidth   = 0.5;
       } else {
-        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-        ctx.lineWidth   = 0.3;
+        ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+        ctx.lineWidth   = 0.5;
       }
       ctx.setLineDash([]);
       ctx.beginPath();
       ctx.moveTo(LABEL_W, yBottom);
       ctx.lineTo(W, yBottom);
       ctx.stroke();
+    }
 
-      // ── 背景水印音名 ─────────────────────────────────
-      if (pixPerMidi >= 8 && !isBlack) {
+    // ── 第二遍：黑键行画居中深色细条覆盖（宽度约 70% 行高，上下留空白） ──
+    // 只有真正存在黑键的位置（C#,D#,F#,G#,A#）才会有深色条，
+    // E-F 和 B-C 之间不会被影响
+    for (let m = mLo; m <= mHi; m++) {
+      const ni = ((m % 12) + 12) % 12;
+      if (!BLACK_KEYS.has(ni)) continue;
+
+      const yTop    = midiToY(m + 1);
+      const yBottom = midiToY(m);
+      const rowH    = yBottom - yTop;
+      if (rowH <= 0) continue;
+
+      const pad = rowH * 0.1;   // 上下各留 10%
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(LABEL_W, yTop + pad, plotW, rowH - pad * 2);
+    }
+
+    // ── 第三遍：背景水印音名（白键行） ─────────────────
+    if (pixPerMidi >= 8) {
+      for (let m = mLo; m <= mHi; m++) {
+        const ni  = ((m % 12) + 12) % 12;
+        if (BLACK_KEYS.has(ni)) continue;
+        const isC = ni === 0;
+        const oct = Math.floor(m / 12) - 1;
+        const yTop    = midiToY(m + 1);
+        const yBottom = midiToY(m);
+        const rowH    = yBottom - yTop;
+        if (rowH <= 0) continue;
         const name = NOTE_NAMES[ni] + oct;
         ctx.save();
         ctx.font         = isC ? 'bold 10px "Segoe UI"' : '9px "Segoe UI"';
@@ -389,7 +406,7 @@ export class PitchHistory {
   // ────────────────────────────────────────────────────────
   //  水平色块轨迹（Piano Roll 风格，连续帧合并为色块）
   // ────────────────────────────────────────────────────────
-  _drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi) {
+  _drawPianoRollTrack(ctx, pts, tsToX, midiToY, pixPerMidi, winStart) {
     const barH   = Math.max(4, Math.min(pixPerMidi * 0.65, 20));
     const radius = barH / 2;
 
@@ -410,39 +427,32 @@ export class PitchHistory {
       }
     }
 
-    // 绘制每个音符块（渐变色块 + 音分着色）
+    // 绘制每个音符块（水平胶囊色块，全部用 roundRect，不再用 arc）
     for (const s of segments) {
       if (s.pts.length === 0) continue;
       const first = s.pts[0];
       const last  = s.pts[s.pts.length - 1];
-      const x0    = tsToX(first.ts);
-      const x1    = tsToX(last.ts)  + 2;  // 略延伸避免闪烁
-      const segW  = Math.max(3, x1 - x0);
 
-      // 单帧单点：画小圆圈
-      if (s.pts.length === 1) {
-        const y     = midiToY(first.midi);
-        const color = _tuneColor(first.cents);
-        ctx.beginPath();
-        ctx.arc(x0, y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.globalAlpha = 0.85;
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        continue;
-      }
+      // 时间淡出：越旧越透明（0.20 → 1.0）
+      const midTs   = (first.ts + last.ts) / 2;
+      const ageFrac = Math.max(0, Math.min(1, (midTs - winStart) / WINDOW_SEC));
+      const baseAlpha = 0.20 + ageFrac * 0.80;
 
-      // 多帧：绘制圆角矩形色块（用加权平均 midi，颜色取众数）
+      const x0   = tsToX(first.ts);
+      const x1   = tsToX(last.ts) + 2;  // 略延伸避免闪烁
+      // 单帧也保证最小宽度 = barH（形成圆形胶囊），不再用 arc
+      const segW = Math.max(barH, x1 - x0);
+
       const avgMidi  = s.pts.reduce((a, p) => a + p.midi, 0) / s.pts.length;
       const avgCents = s.pts.reduce((a, p) => a + (p.cents ?? 0), 0) / s.pts.length;
       const color    = _tuneColor(avgCents);
       const y        = midiToY(avgMidi);
 
-      // 主色块
+      // 主色块（统一用圆角矩形胶囊）
       ctx.save();
       ctx.shadowColor  = color;
       ctx.shadowBlur   = 6;
-      ctx.globalAlpha  = 0.9;
+      ctx.globalAlpha  = baseAlpha * 0.9;
       ctx.beginPath();
       ctx.roundRect(x0, y - barH / 2, segW, barH, radius);
       ctx.fillStyle = color;
@@ -451,23 +461,24 @@ export class PitchHistory {
 
       // 高光细线（顶部 1px 白色，增加立体感）
       ctx.save();
-      ctx.globalAlpha = 0.25;
+      ctx.globalAlpha = baseAlpha * 0.25;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth   = 1;
       ctx.beginPath();
       ctx.moveTo(x0 + radius, y - barH / 2 + 0.5);
-      ctx.lineTo(x1 - radius, y - barH / 2 + 0.5);
+      ctx.lineTo(x0 + segW - radius, y - barH / 2 + 0.5);
       ctx.stroke();
       ctx.restore();
 
-      // 若帧间 midi 起伏明显，叠加一条平滑连线表现滑音
+      // 若帧间 midi 起伏明显，叠加平滑连线（滑音曲线），降低至 20% 不透明度
       const midiRange = Math.max(...s.pts.map(p => p.midi)) - Math.min(...s.pts.map(p => p.midi));
       if (midiRange >= 1 && s.pts.length >= 3) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.20)';
         ctx.lineWidth   = 1.5;
         ctx.lineJoin    = 'round';
         ctx.lineCap     = 'round';
+        ctx.globalAlpha = baseAlpha;
         ctx.beginPath();
         s.pts.forEach((p, i) => {
           const px = tsToX(p.ts);
