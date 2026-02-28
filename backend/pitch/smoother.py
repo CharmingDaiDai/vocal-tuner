@@ -168,6 +168,10 @@ class PitchSmoother:
             "debounce": self._n_debounce,
         }
 
+    def set_conf_thresh(self, v: float) -> None:
+        """运行时更新置信度门控阈值（0.0–1.0）。"""
+        self._conf_thresh = max(0.0, min(1.0, v))
+
     def reset(self):
         """重置内部状态（换歌/重新连接时调用）"""
         self._recent_midi.clear()

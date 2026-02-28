@@ -36,7 +36,7 @@ from pydantic import BaseModel
 from audio.capture import AudioCapture
 from pitch.detector import detect_pitch, compute_fft, warmup
 from pitch.music_theory import freq_to_note, is_in_tune
-from pitch.smoother import PitchSmoother
+from pitch.smoother import PitchSmoother, _CONF_THRESH
 from pitch.analysis_store import AnalysisStore
 from worker import worker_init, analyze_task
 
@@ -57,11 +57,11 @@ WORKER_PROCESSES = 2
 BACKEND_DIR  = Path(__file__).parent
 STATIC_DIR   = BACKEND_DIR / "static"
 UPLOAD_DIR   = BACKEND_DIR / "uploads"
-LEGACY_DIR   = BACKEND_DIR.parent / "frontend"
 
 # ── Global shared state ───────────────────────────────────
 capture   = AudioCapture()
 is_paused = False
+_global_conf_thresh: float = _CONF_THRESH  # runtime-adjustable via /api/settings
 store     = AnalysisStore(UPLOAD_DIR)
 _jobs: Dict[str, dict] = {}
 
@@ -234,10 +234,9 @@ if _assets_src.exists():
 
 @app.get("/")
 async def serve_index():
-    for d in [STATIC_DIR, LEGACY_DIR]:
-        idx = d / "index.html"
-        if idx.exists():
-            return FileResponse(str(idx))
+    idx = STATIC_DIR / "index.html"
+    if idx.exists():
+        return FileResponse(str(idx))
     return JSONResponse({"error": "index.html 不存在，请先运行 npm run build"}, status_code=404)
 
 
@@ -276,6 +275,27 @@ async def get_status():
 @app.get("/api/server-info")
 async def server_info():
     return {"local_ip": _get_local_ip(), "port": 8000}
+
+
+# ── REST — settings ───────────────────────────────────────
+class SettingsRequest(BaseModel):
+    conf_thresh: Optional[float] = None
+
+
+@app.get("/api/settings")
+async def get_settings():
+    return {"conf_thresh": _global_conf_thresh}
+
+
+@app.post("/api/settings")
+async def update_settings(req: SettingsRequest):
+    global _global_conf_thresh
+    if req.conf_thresh is not None:
+        _global_conf_thresh = max(0.0, min(1.0, req.conf_thresh))
+        # 实时更新所有已连接客户端的平滑器
+        for sess in list(_ws_clients.values()):
+            sess.smoother.set_conf_thresh(_global_conf_thresh)
+    return {"conf_thresh": _global_conf_thresh}
 
 
 class DeviceRequest(BaseModel):
@@ -468,6 +488,7 @@ async def websocket_pitch(ws: WebSocket):
 
     client_id = str(uuid.uuid4())[:8]
     session   = ClientSession()
+    session.smoother.set_conf_thresh(_global_conf_thresh)  # apply current global threshold
     _ws_clients[client_id] = session
     logger.info(f"WebSocket 连接 [{client_id}]（共 {len(_ws_clients)} 个）")
 
@@ -498,14 +519,12 @@ async def websocket_pitch(ws: WebSocket):
 # ── SPA fallback (must be last) ───────────────────────────
 @app.get("/{path:path}")
 async def serve_spa(path: str):
-    for d in [STATIC_DIR, LEGACY_DIR]:
-        f = d / path
-        if f.exists() and f.is_file():
-            return FileResponse(str(f))
-    for d in [STATIC_DIR, LEGACY_DIR]:
-        idx = d / "index.html"
-        if idx.exists():
-            return FileResponse(str(idx))
+    f = STATIC_DIR / path
+    if f.exists() and f.is_file():
+        return FileResponse(str(f))
+    idx = STATIC_DIR / "index.html"
+    if idx.exists():
+        return FileResponse(str(idx))
     return JSONResponse({"error": "not found"}, status_code=404)
 
 

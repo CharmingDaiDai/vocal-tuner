@@ -51,4 +51,13 @@ export const api = {
     form.append('file', file)
     return apiFetch<UploadResponse>('/api/analyze', { method: 'POST', body: form })
   },
+
+  // Settings
+  getSettings: () => apiFetch<{ conf_thresh: number }>('/api/settings'),
+  updateSettings: (conf_thresh: number) =>
+    apiFetch<{ conf_thresh: number }>('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conf_thresh }),
+    }),
 }

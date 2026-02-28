@@ -17,6 +17,7 @@ import { Piano }        from '@/components/visualizers/Piano'
 import { FftSpectrum }  from '@/components/visualizers/FftSpectrum'
 import { TuneBadge }    from '@/components/ui/TuneBadge'
 import { useDevices, useSwitchDevice } from '@/api/hooks'
+import { api } from '@/api/client'
 import { cn } from '@/lib/cn'
 import {
   Mic, MicOff, RotateCcw, ZoomIn, ZoomOut, Maximize2, Minimize2,
@@ -63,6 +64,23 @@ export default function Home() {
 
   const { data: devicesData } = useDevices()
   const switchDevice = useSwitchDevice()
+
+  // ── Confidence threshold ───────────────────────────────
+  const [confThresh, setConfThreshLocal] = useState(0.45)
+  const confDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Fetch initial value from backend on mount
+  useEffect(() => {
+    api.getSettings().then(s => setConfThreshLocal(s.conf_thresh)).catch(() => {})
+  }, [])
+
+  const handleConfChange = (v: number) => {
+    setConfThreshLocal(v)
+    if (confDebounceRef.current) clearTimeout(confDebounceRef.current)
+    confDebounceRef.current = setTimeout(() => {
+      api.updateSettings(v).catch(() => {})
+    }, 250)
+  }
 
   // ── Push live frames into history ────────────────────────
   useEffect(() => {
@@ -135,6 +153,23 @@ export default function Home() {
             </select>
           </label>
         )}
+
+        {/* Confidence threshold slider */}
+        <label className="flex items-center gap-1.5 ml-2" title="置信度门控：低于此值的帧不显示音高">
+          <span className="text-xs text-text-muted whitespace-nowrap">置信度</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={Math.round(confThresh * 100)}
+            onChange={e => handleConfChange(parseInt(e.target.value) / 100)}
+            className="w-20 accent-accent cursor-pointer"
+          />
+          <span className="w-7 text-right font-mono text-xs text-text-muted">
+            {Math.round(confThresh * 100)}%
+          </span>
+        </label>
 
         <div className="ml-auto flex items-center gap-1.5 flex-wrap">
           {/* Style */}
