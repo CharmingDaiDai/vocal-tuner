@@ -73,11 +73,12 @@ export class PitchHistory {
     const midi = msg.voiced ? _freqToMidi(msg.freq) : null;
     // 写入循环缓冲区（自动覆盖最旧条目，无需 shift()）
     this._buf[this._wPtr] = {
-      ts:        msg.ts ?? Date.now() / 1000,
+      ts:         msg.ts ?? Date.now() / 1000,
       midi,
-      note_full: msg.note_full ?? '',
-      voiced:    msg.voiced,
-      cents:     msg.cents ?? 0,
+      note_full:  msg.note_full ?? '',
+      voiced:     msg.voiced,
+      cents:      msg.cents ?? 0,
+      confidence: msg.confidence ?? 1,
     };
     this._wPtr = (this._wPtr + 1) % this._CAP;
     if (this._len < this._CAP) this._len++;
@@ -427,8 +428,18 @@ export class PitchHistory {
       }
     }
 
+    // 前端最后一道防线：过滤持续时间不足且置信度偏低的短爆音胶囊
+    // （后端 smoother 已处理大部分情况，此处属于容错垃圾收集）
+    const MIN_CAPS_SEC  = 0.06;   // 小于 60 ms 且均均置信度 < 0.75 则跳过
+    const filteredSegs = segments.filter(s => {
+      const dur = s.lastTs - s.pts[0].ts;
+      if (dur >= MIN_CAPS_SEC) return true;
+      const avgConf = s.pts.reduce((a, p) => a + (p.confidence ?? 1), 0) / s.pts.length;
+      return avgConf >= 0.75;
+    });
+
     // 绘制每个音符块（水平胶囊色块，全部用 roundRect，不再用 arc）
-    for (const s of segments) {
+    for (const s of filteredSegs) {
       if (s.pts.length === 0) continue;
       const first = s.pts[0];
       const last  = s.pts[s.pts.length - 1];

@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from audio.capture import AudioCapture
 from pitch.detector import detect_pitch, compute_fft, warmup
 from pitch.music_theory import freq_to_note, is_in_tune
+from pitch.smoother import PitchSmoother
 from pitch.song_analyzer import analyze_audio_file
 from pitch.analysis_store import AnalysisStore
 
@@ -43,7 +44,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── 全局状态 ──────────────────────────────────────────────
-capture = AudioCapture()
+capture  = AudioCapture()
+smoother = PitchSmoother()               # 实时音高异常点过滤器
 is_paused = False                        # 暂停标志
 # 每个 WebSocket 连接对应一个私有队列，广播循环写入，连接读取
 _ws_clients: Set[asyncio.Queue] = set()
@@ -100,9 +102,11 @@ async def _pitch_broadcast_loop():
             frame_count += 1
 
             # 音高检测：只跑一次，结果广播给所有客户端
-            pitch_result = await asyncio.to_thread(
+            raw_result = await asyncio.to_thread(
                 detect_pitch, frame, SAMPLE_RATE, CHUNK_SIZE
             )
+            # 在检测结果上附加时间戳，使 debounce 缓存帧保留原始时间
+            raw_result["_ts"] = time.time()
 
             # FFT（每隔 FFT_SKIP 帧发一次）
             fft_data = None
@@ -111,46 +115,56 @@ async def _pitch_broadcast_loop():
                     compute_fft, frame, SAMPLE_RATE, 256, 4000.0
                 )
 
-            # 构建消息（在此处序列化一次，分发字节串，避免多次 json.dumps）
-            msg: dict = {
-                "type":       "pitch",
-                "ts":         time.time(),
-                "freq":       pitch_result["freq"],
-                "voiced":     pitch_result["voiced"],
-                "confidence": pitch_result["confidence"],
-                "rms":        pitch_result["rms"],
-                "note_full":  None,
-                "note":       None,
-                "octave":     None,
-                "cents":      None,
-                "ref_freq":   None,
-                "tune_level": None,
-            }
+            # ── 异常点过滤（置信度 + 跳变 + Debounce） ──────────
+            # smoother.feed() 通常返回 1 帧；debounce 确认时可能返回多帧
+            smoothed_frames = smoother.feed(raw_result)
 
-            if pitch_result["voiced"] and pitch_result["freq"] > 0:
-                note_info = freq_to_note(pitch_result["freq"])
-                if note_info:
-                    msg.update({
-                        "note_full":  note_info["note_full"],
-                        "note":       note_info["note"],
-                        "octave":     note_info["octave"],
-                        "cents":      note_info["cents"],
-                        "ref_freq":   note_info["ref_freq"],
-                        "tune_level": is_in_tune(note_info["cents"]),
-                    })
+            for pitch_result in smoothed_frames:
+                frame_ts = pitch_result.pop("_ts", time.time())
 
-            if fft_data is not None:
-                msg["fft"] = fft_data
+                # 构建消息（在此处序列化一次，分发字节串，避免多次 json.dumps）
+                msg: dict = {
+                    "type":       "pitch",
+                    "ts":         frame_ts,
+                    "freq":       pitch_result["freq"],
+                    "voiced":     pitch_result["voiced"],
+                    "confidence": pitch_result["confidence"],
+                    "rms":        pitch_result["rms"],
+                    "suppressed": pitch_result.get("suppressed"),
+                    "note_full":  None,
+                    "note":       None,
+                    "octave":     None,
+                    "cents":      None,
+                    "ref_freq":   None,
+                    "tune_level": None,
+                }
 
-            # JSON 序列化移出事件循环（防止大 payload 阻塞调度）
-            payload = await asyncio.to_thread(json.dumps, msg)
+                if pitch_result["voiced"] and pitch_result["freq"] > 0:
+                    note_info = freq_to_note(pitch_result["freq"])
+                    if note_info:
+                        msg.update({
+                            "note_full":  note_info["note_full"],
+                            "note":       note_info["note"],
+                            "octave":     note_info["octave"],
+                            "cents":      note_info["cents"],
+                            "ref_freq":   note_info["ref_freq"],
+                            "tune_level": is_in_tune(note_info["cents"]),
+                        })
 
-            # 广播给所有已注册队列
-            for q in list(_ws_clients):
-                try:
-                    q.put_nowait(payload)
-                except asyncio.QueueFull:
-                    pass  # 客户端消费太慢时静默丢帧，保护广播循环
+                # FFT 只附到第一帧（避免重复传输）
+                if fft_data is not None:
+                    msg["fft"] = fft_data
+                    fft_data = None
+
+                # JSON 序列化移出事件循环（防止大 payload 阻塞调度）
+                payload = await asyncio.to_thread(json.dumps, msg)
+
+                # 广播给所有已注册队列
+                for q in list(_ws_clients):
+                    try:
+                        q.put_nowait(payload)
+                    except asyncio.QueueFull:
+                        pass  # 客户端消费太慢时静默丢帧，保护广播循环
 
         except asyncio.CancelledError:
             break
