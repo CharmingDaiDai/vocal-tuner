@@ -88,7 +88,7 @@ pitch-session-*.csv
 # ── 项目特定 ─────────────────────────────────────────────
 # sounddevice / PortAudio 不生成额外文件，无需排除
 # librosa 缓存（numba JIT 缓存存入 __pycache__，已覆盖）
-
+backend/uploads/*
 # 环境快照不忽略（environment.yml 应提交，方便复现环境）
 # environment.yml  ← 故意不忽略
 
