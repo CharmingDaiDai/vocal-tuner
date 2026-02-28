@@ -4,8 +4,9 @@ PitchSmoother — 实时音高流异常点过滤器
 三层门控（无需外部依赖，纯 Python 标准库）：
 
   层 1 — 置信度门控（Confidence Gate）
-    confidence < PITCH_CONF_THRESH (默认 0.55) → voiced=False
-    消除 pYIN 低置信度的误检帧
+    confidence < PITCH_CONF_THRESH (默认 0.45) → voiced=False
+    消除 pYIN 低置信度的误检帧（detector 已修复为取最高置信度帧，
+    正常人声通常 ≥ 0.60，0.45 可有效过滤 HMM 极度不确定的帧）
 
   层 2 — 跳变检测（Spike Filter）
     与最近 3 个 voiced 帧的中位 MIDI 音高相差 > PITCH_JUMP_THRESH 个半音
@@ -33,7 +34,10 @@ from copy import copy
 logger = logging.getLogger(__name__)
 
 # 从环境变量读取阈值（支持运行时覆盖）
-_CONF_THRESH        = float(os.getenv("PITCH_CONF_THRESH",        "0.55"))
+# 注意：detector.py 已修复为取"最高置信度帧"而非"末帧"，
+# 纯正弦波下 max_prob ≈ 0.95，正常人声下通常 ≥ 0.60，
+# 因此 0.45 是合理下限（过滤 HMM 极度不确定的帧）。
+_CONF_THRESH        = float(os.getenv("PITCH_CONF_THRESH",        "0.45"))
 _JUMP_THRESH_ST     = float(os.getenv("PITCH_JUMP_THRESH",        "9"))    # 半音
 _MIN_VOICED_FRAMES  = int(  os.getenv("PITCH_MIN_VOICED_FRAMES",  "3"))
 

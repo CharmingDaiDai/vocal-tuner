@@ -76,12 +76,16 @@ def detect_pitch(
             hop_length=chunk_size // 2,
         )
 
-        # pYIN 返回多帧，取最后一帧（最新数据）中 voiced 的结果
+        # pYIN 返回多帧；取"置信度最高"的 voiced 帧（而非最后一帧）。
+        # 原因：pYIN HMM 存在边缘效应——chunk 首尾两帧因上下文不足，
+        # local voiced_prob 偏低（实测首帧可低至 0.48），但 Viterbi 仍判
+        # voiced。取最高置信度帧可同时得到最准确的 f0 和最可靠的 confidence。
         valid_indices = np.where(voiced_flag)[0]
         if len(valid_indices) == 0:
             return {"freq": 0.0, "voiced": False, "confidence": 0.0, "rms": rms}
 
-        idx = valid_indices[-1]
+        best_in_valid = int(np.argmax(voiced_prob[valid_indices]))
+        idx = valid_indices[best_in_valid]
         freq = float(f0[idx]) if not np.isnan(f0[idx]) else 0.0
         confidence = float(voiced_prob[idx])
 
