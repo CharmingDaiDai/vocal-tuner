@@ -18,6 +18,7 @@ import logging
 import shutil
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +46,8 @@ logger = logging.getLogger(__name__)
 capture = AudioCapture()
 is_paused = False                        # 暂停标志
 active_ws: Set[WebSocket] = set()        # 当前所有 WebSocket 连接
-
+# 歌曲分析独立线程池：max_workers=2 防止占满默认池，与 detect_pitch 队列完全隔离
+_analysis_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="song-analysis")
 SAMPLE_RATE = 44100
 CHUNK_SIZE = 2048
 FFT_SKIP = 3       # 每 N 帧发送一次 FFT（降低带宽）
@@ -72,7 +74,7 @@ _jobs: dict[str, dict] = {}
 # ── 生命周期 ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # 确保上传目录存在
     UPLOAD_DIR.mkdir(exist_ok=True)
@@ -85,8 +87,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # 关闭麦克风
+    # 关闭麦克风 + 等待分析线程池任务完成
     capture.stop()
+    _analysis_executor.shutdown(wait=False)
 
 
 app = FastAPI(title="Vocal Tuner", lifespan=lifespan)
@@ -206,8 +209,11 @@ async def upload_and_analyze(file: UploadFile = File(...)):
     logger.info(f"[Analyze] 任务 {job_id} 开始，文件：{file.filename}")
 
     async def _run_analysis():
+        loop = asyncio.get_running_loop()
         try:
-            result = await asyncio.to_thread(
+            # 运行在独立线程池，不占用 detect_pitch 的默认线程池
+            result = await loop.run_in_executor(
+                _analysis_executor,
                 analyze_audio_file,
                 str(filepath),
             )
@@ -218,7 +224,7 @@ async def upload_and_analyze(file: UploadFile = File(...)):
                 job["duration"]     = result["duration"]
                 job["rms"]          = result["rms"]
                 logger.info(f"[Analyze] {job_id} 分析完成，duration={result['duration']:.1f}s")
-                store.save(job_id, {
+                save_payload = {
                     "original_name": job["original_name"],
                     "filename":      job["filename"],
                     "duration":      job["duration"],
@@ -226,7 +232,9 @@ async def upload_and_analyze(file: UploadFile = File(...)):
                     "created_at":    datetime.now().isoformat(timespec="seconds"),
                     "rms":           job["rms"],
                     "fine_pitches":  job["fine_pitches"],
-                })
+                }
+                # JSON 序列化 + 写盘均在独立线程执行，不阻塞事件循环
+                await asyncio.to_thread(store.save, job_id, save_payload)
         except Exception as e:
             logger.error(f"[Analyze] {job_id} 失败：{e}")
             job = _jobs.get(job_id)
@@ -248,13 +256,14 @@ async def upload_and_analyze(file: UploadFile = File(...)):
 @app.get("/api/library")
 async def list_library():
     """返回所有已持久化歌曲的元数据列表（不含 pitches）。"""
-    return {"songs": store.list_all()}
+    songs = await asyncio.to_thread(store.list_all)
+    return {"songs": songs}
 
 
 @app.get("/api/library/{job_id}")
 async def get_library_item(job_id: str):
     """返回完整歌曲数据（含 fine_pitches / rms），用于跟唱模式加载。"""
-    data = store.load(job_id)
+    data = await asyncio.to_thread(store.load, job_id)
     if data is None:
         return JSONResponse({"error": "歌曲不存在"}, status_code=404)
     data["audio_url"] = f"/uploads/{data.get('filename', '')}"
@@ -291,10 +300,8 @@ async def get_analysis(job_id: str):
         "audio_url":     f"/uploads/{job['filename']}",
     }
 
-    if job["status"] == "done" and job["fine_pitches"] is not None:
-        resp["rms"]          = job["rms"]
-        resp["fine_pitches"] = job["fine_pitches"]
-
+    # 轮询接口仅返回进度状态和元数据，不包含 pitch 数据体（避免大量 JSON 序列化阻塞事件循环）
+    # 需要 fine_pitches 请调用 GET /api/library/{job_id}
     if job["status"] == "error":
         resp["error"] = job["error"]
 
