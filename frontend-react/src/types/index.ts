@@ -27,6 +27,11 @@ export interface PitchMessage {
   tune_level: 'good' | 'close' | 'off' | null
   fft: number[] | null
   vibrato?: { is_vibrato: boolean; rate_hz: number; depth_cents: number } | null
+  // Karaoke comparison fields (populated by Karaoke page)
+  karaoke_cents?: number
+  karaoke_tune?: 'good' | 'close' | 'off'
+  song_time?: number
+  ref_midi?: number
 }
 
 export type WsMessage = StatusMessage | HeartbeatMessage | PitchMessage
@@ -52,6 +57,8 @@ export interface SongMeta {
   duration: number
   created_at: string
   audio_url: string
+  original_url?: string
+  original_track_name?: string
 }
 
 export interface LibraryResponse {

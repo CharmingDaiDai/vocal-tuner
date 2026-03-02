@@ -183,11 +183,11 @@ class PitchSmoother:
                 self._candidate_semitone = raw_semitone
                 self._candidate_count    = 1
 
-            # 将输出频率"吸附"到 committed 半音中心（None = 首帧直接采用原始频率）
+            # 将已确认半音的参考 MIDI 写入 frame，供 main.py 做音符显示 + cents 计算
+            # 注意：不修改 frame["freq"]，保留实际检测频率以反映真实 cents 偏差
             if self._committed_semitone is None:
                 self._committed_semitone = raw_semitone
-            snapped_hz = 440.0 * (2.0 ** ((self._committed_semitone - 69) / 12.0))
-            frame["freq"] = round(snapped_hz, 3)
+            frame["_ref_midi"] = self._committed_semitone
         else:
             # unvoiced → 清除候选状态（不清除 committed，防止短暂间隙触发重置）
             self._candidate_semitone = None

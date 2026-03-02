@@ -19,6 +19,11 @@ function tuneColor(cents: number | null | undefined): string {
   return '#f85149'
 }
 
+/** Pick karaoke_cents (vs reference) if available, otherwise absolute cents */
+function effectiveCents(p: InternalPoint): number | null {
+  return p.karaoke_cents ?? p.cents
+}
+
 function freqToMidi(freq: number): number | null {
   if (!freq || freq <= 0) return null
   return Math.round((69 + 12 * Math.log2(freq / 440)) * 100) / 100
@@ -30,6 +35,7 @@ interface InternalPoint {
   midi: number | null
   voiced: boolean
   cents: number | null
+  karaoke_cents?: number | null
   confidence?: number
   note_full?: string | null
 }
@@ -71,6 +77,7 @@ export function PitchHistory({ frames, refPitches, wallStart, style = 'piano', m
       midi: freqToMidi(f.freq),
       voiced: f.voiced,
       cents: f.cents,
+      karaoke_cents: f.karaoke_cents,
       confidence: f.confidence,
       note_full: f.note_full,
     }))
@@ -246,7 +253,7 @@ function drawPianoRollTrack(
     const ageFrac = Math.max(0, Math.min(1, (midTs - winStart) / WINDOW_SEC))
     const baseAlpha = 0.20 + ageFrac * 0.80
 
-    const avgCents = s.pts.reduce((a, p) => a + (p.cents ?? 0), 0) / n
+    const avgCents = s.pts.reduce((a, p) => a + (effectiveCents(p) ?? 0), 0) / n
     const color = tuneColor(avgCents)
 
     ctx.save()
@@ -298,7 +305,7 @@ function drawLineTrack(
   for (const s of segs) {
     const midTs = (s.pts[0].ts + s.lastTs) / 2
     const ageFrac = Math.max(0, Math.min(1, (midTs - winStart) / WINDOW_SEC))
-    const avgCents = s.pts.reduce((a, p) => a + (p.cents ?? 0), 0) / s.pts.length
+    const avgCents = s.pts.reduce((a, p) => a + (effectiveCents(p) ?? 0), 0) / s.pts.length
     const color = tuneColor(avgCents)
 
     ctx.globalAlpha = 0.25 + ageFrac * 0.75
@@ -390,7 +397,7 @@ function drawIndicator(
   const last = recent[0]
   const x = tsToX(last.ts)
   const y = midiToY(last.midi!)
-  const color = tuneColor(last.cents)
+  const color = tuneColor(effectiveCents(last))
 
   ctx.save()
 
@@ -401,7 +408,7 @@ function drawIndicator(
     const alpha = 0.15 + frac * 0.35
     const r = 2 + frac * 3
     ctx.globalAlpha = alpha
-    ctx.fillStyle = tuneColor(p.cents)
+    ctx.fillStyle = tuneColor(effectiveCents(p))
     ctx.beginPath()
     ctx.arc(tsToX(p.ts), midiToY(p.midi!), r, 0, Math.PI * 2)
     ctx.fill()
@@ -438,8 +445,9 @@ function drawIndicator(
   ctx.shadowBlur = 0
 
   // Label
-  const centsStr = last.cents != null
-    ? ` ${last.cents >= 0 ? '+' : ''}${last.cents.toFixed(0)}¢`
+  const dispCents = effectiveCents(last)
+  const centsStr = dispCents != null
+    ? ` ${dispCents >= 0 ? '+' : ''}${dispCents.toFixed(0)}¢`
     : ''
   const label = (last.note_full ?? '') + centsStr
   const labelX = Math.min(x + r + 6, W - 4)

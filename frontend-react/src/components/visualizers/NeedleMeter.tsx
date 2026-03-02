@@ -24,8 +24,9 @@ export function NeedleMeter({ pitch, className }: Props) {
     const cy = h * 0.72
     const r  = Math.min(w * 0.44, h * 0.68)
 
-    // Low-pass filter cents
-    const targetCents = (pitch?.voiced && pitch.cents != null) ? pitch.cents : 0
+    // Low-pass filter cents (prefer karaoke_cents when available)
+    const rawCents = pitch?.karaoke_cents ?? pitch?.cents
+    const targetCents = (pitch?.voiced && rawCents != null) ? rawCents : 0
     smoothedRef.current += (targetCents - smoothedRef.current) * 0.25
     const smoothed = smoothedRef.current
 
@@ -122,8 +123,9 @@ export function NeedleMeter({ pitch, className }: Props) {
       ctx.fillText(pitch.note_full, cx, cy * 0.45)
       ctx.font = `${Math.round(h * 0.07)}px "Inter", sans-serif`
       ctx.fillStyle = '#8b949e'
-      const centsStr = pitch.cents != null
-        ? `${pitch.cents >= 0 ? '+' : ''}${pitch.cents.toFixed(0)}¢`
+      const dispCents = pitch.karaoke_cents ?? pitch.cents
+      const centsStr = dispCents != null
+        ? `${dispCents >= 0 ? '+' : ''}${dispCents.toFixed(0)}¢`
         : '—'
       ctx.fillText(centsStr, cx, cy * 0.65)
       if (pitch.freq > 0) {

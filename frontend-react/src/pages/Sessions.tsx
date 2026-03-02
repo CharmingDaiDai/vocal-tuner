@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useSessions, useDeleteSession, useSession } from '@/api/hooks'
+import { useSessions, useDeleteSession, useSession, useSong } from '@/api/hooks'
 import { Card } from '@/components/ui/Card'
 import { Spinner } from '@/components/ui/Spinner'
 import { Trash2, BarChart2, ChevronLeft } from 'lucide-react'
@@ -39,13 +39,6 @@ function SessionCard({
         >
           <BarChart2 size={11} /> 查看报告
         </button>
-        {session.has_audio && (
-          <audio
-            controls
-            src={`/sessions/${session.session_id}.wav`}
-            className="hidden"
-          />
-        )}
         <button
           onClick={() => onDelete(session.session_id)}
           className="flex items-center justify-center rounded border border-border p-1 text-text-muted opacity-0 group-hover:opacity-100 hover:border-bad/40 hover:text-bad transition-all"
@@ -60,6 +53,8 @@ function SessionCard({
 // ── Report view ────────────────────────────────────────────
 function ReportView({ sessionId, onBack }: { sessionId: string; onBack: () => void }) {
   const { data, isLoading, error } = useSession(sessionId)
+  // Load reference song for pitch comparison (when session is from karaoke mode)
+  const { data: refSong } = useSong(data?.song_job_id ?? null)
 
   if (isLoading) {
     return (
@@ -78,6 +73,10 @@ function ReportView({ sessionId, onBack }: { sessionId: string; onBack: () => vo
     )
   }
 
+  const audioUrl = data.has_audio
+    ? `/api/sessions/${data.session_id}/audio`
+    : undefined
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex items-center gap-3 border-b border-border px-4 py-2.5">
@@ -89,18 +88,19 @@ function ReportView({ sessionId, onBack }: { sessionId: string; onBack: () => vo
         </button>
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium text-text">{data.name}</div>
-          <div className="text-xs text-text-muted">{data.created_at.slice(0, 10)} · {data.frame_count} 帧</div>
+          <div className="text-xs text-text-muted">
+            {data.created_at.slice(0, 10)} · {data.frame_count} 帧
+            {data.song_job_id && <span className="ml-1 text-accent/70">跟唱</span>}
+          </div>
         </div>
-        {data.has_audio && (
-          <audio
-            controls
-            src={`/sessions/${data.session_id}.wav`}
-            className="h-8 w-48"
-          />
-        )}
       </div>
       <div className="flex-1 overflow-y-auto p-4">
-        <PracticeReport frames={data.frames} />
+        <PracticeReport
+          frames={data.frames}
+          refPitches={refSong?.fine_pitches}
+          audioUrl={audioUrl}
+          duration={data.duration}
+        />
       </div>
     </div>
   )

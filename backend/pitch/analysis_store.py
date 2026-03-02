@@ -39,13 +39,17 @@ class AnalysisStore:
         - {job_id}.meta.json 仅元数据（无 pitches），用于快速列表查询
         """
         meta = {
-            "job_id":        job_id,
-            "original_name": data.get("original_name"),
-            "filename":      data.get("filename"),
-            "duration":      data.get("duration"),
-            "sr":            data.get("sr", 22050),
-            "created_at":    data.get("created_at", datetime.now().isoformat(timespec="seconds")),
+            "job_id":             job_id,
+            "original_name":      data.get("original_name"),
+            "filename":           data.get("filename"),
+            "duration":           data.get("duration"),
+            "sr":                 data.get("sr", 22050),
+            "created_at":         data.get("created_at", datetime.now().isoformat(timespec="seconds")),
         }
+        # 仅在存在时写入原文件字段（避免污染无原文件的旧记录）
+        if data.get("original_filename"):
+            meta["original_filename"]   = data["original_filename"]
+            meta["original_track_name"] = data.get("original_track_name")
         payload = {
             **meta,
             "rms":          data.get("rms"),
@@ -122,6 +126,9 @@ class AnalysisStore:
                     "duration":      meta.get("duration"),
                     "created_at":    meta.get("created_at"),
                     "audio_url":     f"/uploads/{meta.get('filename', '')}",
+                    **({"original_url":        f"/uploads/{meta['original_filename']}",
+                        "original_track_name": meta.get("original_track_name")}
+                       if meta.get("original_filename") else {}),
                 })
             except Exception as e:
                 logger.warning(f"[Store] 跳过损坏文件 {p.name}：{e}")
@@ -145,6 +152,9 @@ class AnalysisStore:
                     "duration":      data.get("duration"),
                     "created_at":    data.get("created_at"),
                     "audio_url":     f"/uploads/{data.get('filename', '')}",
+                    **({"original_url":        f"/uploads/{data['original_filename']}",
+                        "original_track_name": data.get("original_track_name")}
+                       if data.get("original_filename") else {}),
                 })
                 # 顺手生成 meta 文件，之后就不用再读大文件了
                 self._write_meta(job_id, data)
@@ -166,6 +176,9 @@ class AnalysisStore:
                 "sr":            data.get("sr", 22050),
                 "created_at":    data.get("created_at"),
             }
+            if data.get("original_filename"):
+                meta["original_filename"]   = data["original_filename"]
+                meta["original_track_name"] = data.get("original_track_name")
             meta_path = self._dir / f"{job_id}.meta.json"
             with meta_path.open("w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, separators=(",", ":"))
@@ -197,6 +210,9 @@ class AnalysisStore:
         for p in (json_path, meta_path, self._dir / f"{job_id}.lrc.json"):
             if p.exists():
                 p.unlink()
+        # 删除原文件（original track）
+        for f in upload_dir.glob(f"{job_id}_original.*"):
+            f.unlink(missing_ok=True)
         logger.info(f"[Store] 已删除记录 {job_id}")
         return True
 

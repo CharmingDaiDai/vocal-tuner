@@ -84,6 +84,9 @@ _ws_clients: Dict[str, ClientSession] = {}
 
 # ── ProcessPool for song analysis ────────────────────────
 _analysis_executor: Optional[ProcessPoolExecutor] = None
+# Manager 用于创建可跨 spawn 进程 pickle 的进度代理对象
+# 注意：mp.Value() 无法在 spawn 方式下 pickle，需要 Manager().Value() 代替
+_mp_manager = None  # type: ignore  # multiprocessing.managers.SyncManager
 
 
 def _get_local_ip() -> str:
@@ -158,16 +161,35 @@ async def _pitch_broadcast_loop():
                     }
 
                     if pitch_result["voiced"] and pitch_result["freq"] > 0:
-                        note_info = freq_to_note(pitch_result["freq"])
-                        if note_info:
+                        ref_midi = pitch_result.get("_ref_midi")
+                        if ref_midi is not None:
+                            # 磁吸模式：音符名取自 committed semitone（稳定），
+                            # cents 取自实际频率 vs committed 半音中心（反映真实偏差）
+                            ref_freq_hz = 440.0 * (2.0 ** ((ref_midi - 69) / 12.0))
+                            cents_val = 1200.0 * np.log2(pitch_result["freq"] / ref_freq_hz)
+                            note_idx = ref_midi % 12
+                            note_names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+                            note_name = note_names[note_idx]
+                            octave_val = (ref_midi // 12) - 1
                             msg.update({
-                                "note_full":  note_info["note_full"],
-                                "note":       note_info["note"],
-                                "octave":     note_info["octave"],
-                                "cents":      note_info["cents"],
-                                "ref_freq":   note_info["ref_freq"],
-                                "tune_level": is_in_tune(note_info["cents"]),
+                                "note_full":  f"{note_name}{octave_val}",
+                                "note":       note_name,
+                                "octave":     int(octave_val),
+                                "cents":      round(float(cents_val), 2),
+                                "ref_freq":   round(ref_freq_hz, 3),
+                                "tune_level": is_in_tune(float(cents_val)),
                             })
+                        else:
+                            note_info = freq_to_note(pitch_result["freq"])
+                            if note_info:
+                                msg.update({
+                                    "note_full":  note_info["note_full"],
+                                    "note":       note_info["note"],
+                                    "octave":     note_info["octave"],
+                                    "cents":      note_info["cents"],
+                                    "ref_freq":   note_info["ref_freq"],
+                                    "tune_level": is_in_tune(note_info["cents"]),
+                                })
                         # Vibrato detection (only on voiced frames)
                         midi_val = 69 + 12 * np.log2(pitch_result["freq"] / 440) if pitch_result["freq"] > 0 else None
                         vib = sess.vibrato.feed(midi_val, True)
@@ -195,12 +217,16 @@ async def _pitch_broadcast_loop():
 # ── Lifespan ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _analysis_executor
+    global _analysis_executor, _mp_manager
 
     UPLOAD_DIR.mkdir(exist_ok=True)
     SESSION_DIR.mkdir(exist_ok=True)
 
     await asyncio.to_thread(warmup, SAMPLE_RATE, CHUNK_SIZE)
+
+    # Manager 必须在 ProcessPoolExecutor 之前启动
+    # Manager().Value() 创建的代理对象可以 pickle 传递给 spawn 子进程
+    _mp_manager = mp.Manager()
 
     _analysis_executor = ProcessPoolExecutor(
         max_workers=WORKER_PROCESSES,
@@ -213,7 +239,7 @@ async def lifespan(app: FastAPI):
     broadcast_task = asyncio.create_task(_pitch_broadcast_loop(), name="pitch-broadcast")
 
     ip = _get_local_ip()
-    logger.info(f"服务已启动 — 局域网访问地址: http://{ip}:8000")
+    logger.info(f"服务已启动 — 局域网访问地址: http://{ip}:9000")
 
     yield
 
@@ -225,6 +251,8 @@ async def lifespan(app: FastAPI):
     capture.stop()
     if _analysis_executor:
         _analysis_executor.shutdown(wait=False)
+    if _mp_manager:
+        _mp_manager.shutdown()
 
 
 # ── App ───────────────────────────────────────────────────
@@ -290,7 +318,7 @@ async def get_status():
 
 @app.get("/api/server-info")
 async def server_info():
-    return {"local_ip": _get_local_ip(), "port": 8000}
+    return {"local_ip": _get_local_ip(), "port": 9000}
 
 
 # ── REST — settings ───────────────────────────────────────
@@ -348,6 +376,8 @@ async def get_library_item(job_id: str):
     if data is None:
         return JSONResponse({"error": "歌曲不存在"}, status_code=404)
     data["audio_url"] = f"/uploads/{data.get('filename', '')}"
+    if data.get("original_filename"):
+        data["original_url"] = f"/uploads/{data['original_filename']}"
     return data
 
 
@@ -391,7 +421,79 @@ async def delete_lyrics(job_id: str):
     return {"status": "deleted", "job_id": job_id}
 
 
-# ── REST — analysis ───────────────────────────────────────
+# ── REST — original track ─────────────────────────────────
+@app.post("/api/library/{job_id}/original")
+async def upload_original(job_id: str, file: UploadFile = File(...)):
+    """上传或替换原文件（用于跟唱模式播放）。
+    同时尝试从原文件中自动提取 SYLT 内嵌歌词。
+    """
+    if not store.exists(job_id):
+        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
+
+    suffix    = Path(file.filename or "audio").suffix.lower() or ".mp3"
+    orig_name = f"{job_id}_original{suffix}"
+    orig_path = UPLOAD_DIR / orig_name
+
+    # 删除旧的原文件（如有，扩展名可能不同）
+    for old in UPLOAD_DIR.glob(f"{job_id}_original.*"):
+        old.unlink(missing_ok=True)
+
+    # 保存新文件
+    contents = await file.read()
+    orig_path.write_bytes(contents)
+
+    # 更新元数据（加载完整数据后合并写回）
+    data = await asyncio.to_thread(store.load, job_id)
+    if data is None:
+        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
+    data["original_filename"]   = orig_name
+    data["original_track_name"] = file.filename
+    await asyncio.to_thread(store.save, job_id, data)
+
+    # 尝试自动提取 SYLT 歌词（仅在当前无歌词时）
+    lyrics_auto = False
+    if store.load_lyrics(job_id) is None:
+        try:
+            lyrics = await asyncio.to_thread(extract_lyrics_from_audio, str(orig_path))
+            if lyrics:
+                await asyncio.to_thread(store.save_lyrics, job_id, lyrics)
+                lyrics_auto = True
+                logger.info(f"[Original] 自动提取歌词 {job_id}（{len(lyrics)} 行）")
+        except Exception as e:
+            logger.warning(f"[Original] 自动提取歌词失败（{job_id}）：{e}")
+
+    return {
+        "job_id":       job_id,
+        "original_url": f"/uploads/{orig_name}",
+        "lyrics_auto":  lyrics_auto,
+    }
+
+
+@app.delete("/api/library/{job_id}/original")
+async def delete_original(job_id: str):
+    """删除原文件。"""
+    if not store.exists(job_id):
+        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
+
+    deleted = False
+    for f in UPLOAD_DIR.glob(f"{job_id}_original.*"):
+        f.unlink(missing_ok=True)
+        deleted = True
+
+    if not deleted:
+        return JSONResponse({"error": "原文件不存在"}, status_code=404)
+
+    # 从元数据中移除原文件字段
+    data = await asyncio.to_thread(store.load, job_id)
+    if data:
+        data.pop("original_filename", None)
+        data.pop("original_track_name", None)
+        await asyncio.to_thread(store.save, job_id, data)
+
+    return {"status": "deleted", "job_id": job_id}
+
+
+
 @app.post("/api/analyze")
 async def upload_and_analyze(file: UploadFile = File(...)):
     job_id    = str(uuid.uuid4())[:8]
@@ -405,7 +507,9 @@ async def upload_and_analyze(file: UploadFile = File(...)):
 
     await asyncio.to_thread(_save_upload)
 
-    progress_val = mp.Value("d", 0.0)
+    # Manager().Value() 可以 pickle，可安全跨 spawn 子进程传递；
+    # mp.Value() 使用共享内存+同步锁，Windows spawn 下无法序列化，会抛 RuntimeError
+    progress_val = _mp_manager.Value("d", 0.0)
 
     _jobs[job_id] = {
         "status":        "analyzing",
@@ -690,4 +794,4 @@ async def serve_spa(path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=True)

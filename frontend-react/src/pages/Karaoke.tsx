@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useSong, useSaveSession } from '@/api/hooks'
 import { api } from '@/api/client'
@@ -12,6 +12,39 @@ import { Spinner } from '@/components/ui/Spinner'
 import { TuneBadge } from '@/components/ui/TuneBadge'
 import { ArrowLeft, Play, Pause, SkipBack, Save } from 'lucide-react'
 import { cn } from '@/lib/cn'
+
+// 检测管线延迟补偿：capture(23ms) + pYIN(20ms) + smoother(10ms) + WS(5ms) + render(16ms) ≈ 100ms
+// 正值 → 参考轨道右移 → 实时音高相对左移，补偿延迟
+const LATENCY_OFFSET_SEC = 0.10
+
+import type { PitchPoint, PitchMessage } from '@/types'
+
+// Binary search: find the closest voiced reference pitch at songTime (within ±50ms)
+function findRefPitch(
+  refVoiced: PitchPoint[],
+  songTime: number,
+): PitchPoint | null {
+  if (refVoiced.length === 0 || songTime < 0) return null
+  let lo = 0, hi = refVoiced.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (refVoiced[mid].t < songTime) lo = mid + 1
+    else hi = mid
+  }
+  // Check lo and lo-1 for closest
+  let best = lo
+  if (lo > 0 && Math.abs(refVoiced[lo - 1].t - songTime) < Math.abs(refVoiced[lo].t - songTime)) {
+    best = lo - 1
+  }
+  return Math.abs(refVoiced[best].t - songTime) <= 0.05 ? refVoiced[best] : null
+}
+
+function karaokeLevel(cents: number): 'good' | 'close' | 'off' {
+  const a = Math.abs(cents)
+  if (a <= 15) return 'good'
+  if (a <= 30) return 'close'
+  return 'off'
+}
 
 export default function Karaoke() {
   const { jobId } = useParams<{ jobId: string }>()
@@ -30,10 +63,41 @@ export default function Karaoke() {
   const [wavSessionId, setWavSessionId] = useState<string | null>(null)
   const [showSavePrompt, setShowSavePrompt] = useState(false)
 
-  // Push mic frames to history
+  // Build sorted reference pitch lookup (voiced only)
+  const refVoiced = useMemo(() => {
+    if (!song?.fine_pitches) return []
+    return song.fine_pitches.filter(p => p.voiced && p.midi != null && p.freq > 0)
+  }, [song?.fine_pitches])
+
+  // Latest karaoke-augmented pitch (for TuneBadge / NeedleMeter)
+  const [karaokePitch, setKaraokePitch] = useState<PitchMessage | null>(null)
+
+  // Push mic frames to history, augmented with karaoke comparison
   useEffect(() => {
-    if (latestPitch?.voiced) pushFrame(latestPitch)
-  }, [latestPitch, pushFrame])
+    if (!latestPitch?.voiced || !latestPitch.freq) return
+    const el = audioRef.current
+    const songTime = el ? el.currentTime : undefined
+
+    // Augment frame with karaoke comparison data
+    let augmented: PitchMessage = latestPitch
+    if (songTime != null && songTime > 0 && refVoiced.length > 0 && playing) {
+      const ref = findRefPitch(refVoiced, songTime)
+      if (ref && ref.freq > 0) {
+        const kCents = 1200 * Math.log2(latestPitch.freq / ref.freq)
+        augmented = {
+          ...latestPitch,
+          karaoke_cents: Math.round(kCents * 100) / 100,
+          karaoke_tune: karaokeLevel(kCents),
+          song_time: songTime,
+          ref_midi: ref.midi ?? undefined,
+        }
+      } else {
+        augmented = { ...latestPitch, song_time: songTime }
+      }
+    }
+    setKaraokePitch(augmented)
+    pushFrame(augmented)
+  }, [latestPitch, pushFrame, refVoiced, playing])
 
   // Resume mic when entering karaoke; stop any leftover recording on unmount
   useEffect(() => {
@@ -60,8 +124,8 @@ export default function Karaoke() {
         // Start recording before playback
         api.startRecording().catch(() => {})
         await el.play()
-        setWallStart(Date.now() / 1000 - el.currentTime)
         setPlaying(true)
+        setWallStart(Date.now() / 1000 - el.currentTime + LATENCY_OFFSET_SEC)
       } catch (e) {
         console.error('Playback error', e)
       }
@@ -74,7 +138,7 @@ export default function Karaoke() {
     el.currentTime = t
     setCurrentTime(t)
     if (playing) {
-      setWallStart(Date.now() / 1000 - t)
+      setWallStart(Date.now() / 1000 - t + LATENCY_OFFSET_SEC)
     }
   }, [playing])
 
@@ -148,7 +212,7 @@ export default function Karaoke() {
           <div className="truncate font-medium text-text">{song.original_name}</div>
           <div className="text-xs text-text-muted">{duration.toFixed(0)}s · 跟唱模式</div>
         </div>
-        <TuneBadge level={latestPitch?.voiced ? latestPitch.tune_level : null} />
+        <TuneBadge level={karaokePitch?.voiced ? (karaokePitch.karaoke_tune ?? karaokePitch.tune_level) : null} />
         <button
           onClick={() => {
             if (recordedFrames.length > 0) setShowSavePrompt(true)
@@ -184,7 +248,7 @@ export default function Karaoke() {
         />
         {/* Side meter */}
         <div className="absolute right-3 top-3 h-32 w-28 rounded-lg border border-border/60 bg-bg/80 backdrop-blur">
-          <NeedleMeter pitch={latestPitch} className="absolute inset-0" />
+          <NeedleMeter pitch={karaokePitch ?? latestPitch} className="absolute inset-0" />
         </div>
       </div>
 
@@ -242,7 +306,7 @@ export default function Karaoke() {
       {/* Hidden audio element */}
       <audio
         ref={audioRef}
-        src={song.audio_url}
+        src={song.original_url ?? song.audio_url}
         onTimeUpdate={e => setCurrentTime((e.target as HTMLAudioElement).currentTime)}
         onEnded={handleEnded}
         onError={e => console.error('Audio error', e)}

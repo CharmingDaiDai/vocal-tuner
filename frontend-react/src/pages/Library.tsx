@@ -1,16 +1,42 @@
-import { useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useLibrary, useUpload, useDeleteSong, useAnalysisJob, useUploadLyrics } from '@/api/hooks'
+import { useQueryClient } from '@tanstack/react-query'
+import { useLibrary, useUpload, useDeleteSong, useAnalysisJob, useUploadLyrics, useUploadOriginal, keys } from '@/api/hooks'
 import { Card } from '@/components/ui/Card'
 import { Spinner } from '@/components/ui/Spinner'
 import { ProgressBar } from '@/components/ui/ProgressBar'
-import { Upload, Trash2, Play, Music, FileText } from 'lucide-react'
+import { Upload, Trash2, Play, Music, FileText, Disc } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import type { SongMeta } from '@/types'
 
 // ── Polling card for in-progress jobs ─────────────────────
-function AnalyzingCard({ jobId }: { jobId: string }) {
+function AnalyzingCard({ jobId, onComplete }: { jobId: string; onComplete: (id: string) => void }) {
   const { data } = useAnalysisJob(jobId)
+  const uploadOriginal = useUploadOriginal()
+  const uploadLyrics = useUploadLyrics()
+  const origInputRef = useRef<HTMLInputElement>(null)
+  const lrcInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (data?.status === 'done' || data?.status === 'error') {
+      onComplete(jobId)
+    }
+  }, [data?.status, jobId, onComplete])
+
+  const handleOrigFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    uploadOriginal.mutate({ jobId, file })
+    e.target.value = ''
+  }
+
+  const handleLrcFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    uploadLyrics.mutate({ jobId, file })
+    e.target.value = ''
+  }
+
   return (
     <Card className="opacity-70">
       <div className="flex items-center gap-3">
@@ -20,6 +46,28 @@ function AnalyzingCard({ jobId }: { jobId: string }) {
           <ProgressBar value={data?.progress ?? 0} showLabel className="mt-1.5" />
         </div>
       </div>
+      <div className="mt-2 flex gap-1.5">
+        <button
+          onClick={() => origInputRef.current?.click()}
+          disabled={uploadOriginal.isPending}
+          title="上传原文件（用于播放）"
+          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-xs text-text-muted hover:border-accent/40 hover:text-accent transition-colors"
+        >
+          {uploadOriginal.isPending ? <Spinner size="sm" /> : <Disc size={11} />}
+          原文件
+        </button>
+        <button
+          onClick={() => lrcInputRef.current?.click()}
+          disabled={uploadLyrics.isPending}
+          title="上传 .lrc 歌词文件"
+          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-xs text-text-muted hover:border-accent/40 hover:text-accent transition-colors"
+        >
+          {uploadLyrics.isPending ? <Spinner size="sm" /> : <FileText size={11} />}
+          歌词
+        </button>
+      </div>
+      <input ref={origInputRef} type="file" accept="audio/*" className="hidden" onChange={handleOrigFile} />
+      <input ref={lrcInputRef} type="file" accept=".lrc,text/plain" className="hidden" onChange={handleLrcFile} />
     </Card>
   )
 }
@@ -34,7 +82,9 @@ function SongCard({
 }) {
   const navigate = useNavigate()
   const uploadLyrics = useUploadLyrics()
+  const uploadOriginal = useUploadOriginal()
   const lrcInputRef = useRef<HTMLInputElement>(null)
+  const origInputRef = useRef<HTMLInputElement>(null)
 
   const handleLrcFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -46,7 +96,16 @@ function SongCard({
         onSuccess: (res) => alert(`歌词上传成功（共 ${res.count} 行）`),
       },
     )
-    // 清空 input，允许重复上传同一文件
+    e.target.value = ''
+  }
+
+  const handleOrigFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    uploadOriginal.mutate(
+      { jobId: song.job_id, file },
+      { onError: (err) => alert(`上传原文件失败：${err.message}`) },
+    )
     e.target.value = ''
   }
 
@@ -70,7 +129,22 @@ function SongCard({
         >
           <Play size={11} /> 跟唱
         </button>
-        {/* 上传歌词按钮（悬浮显示） */}
+        {/* 上传原文件按钮 */}
+        <button
+          onClick={() => origInputRef.current?.click()}
+          disabled={uploadOriginal.isPending}
+          title={song.original_url ? `已设置原文件：${song.original_track_name ?? ''}（点击替换）` : '上传原文件（用于播放）'}
+          className={cn(
+            'flex items-center justify-center rounded border p-1 transition-all',
+            song.original_url
+              ? 'border-accent/40 text-accent opacity-100'
+              : 'border-border text-text-muted opacity-0 group-hover:opacity-100 hover:border-accent/40 hover:text-accent',
+            uploadOriginal.isPending && 'opacity-100 cursor-wait',
+          )}
+        >
+          {uploadOriginal.isPending ? <Spinner size="sm" /> : <Disc size={13} />}
+        </button>
+        {/* 上传歌词按钮 */}
         <button
           onClick={() => lrcInputRef.current?.click()}
           disabled={uploadLyrics.isPending}
@@ -89,6 +163,13 @@ function SongCard({
           <Trash2 size={13} />
         </button>
       </div>
+      <input
+        ref={origInputRef}
+        type="file"
+        accept="audio/*"
+        className="hidden"
+        onChange={handleOrigFile}
+      />
       <input
         ref={lrcInputRef}
         type="file"
@@ -138,13 +219,19 @@ export default function Library() {
   const { data, isLoading } = useLibrary()
   const upload = useUpload()
   const deleteSong = useDeleteSong()
-  const pendingJobIds = useRef<string[]>([])
+  const qc = useQueryClient()
+  const [pendingJobIds, setPendingJobIds] = useState<string[]>([])
+
+  const handleComplete = useCallback((jobId: string) => {
+    setPendingJobIds(prev => prev.filter(id => id !== jobId))
+    qc.invalidateQueries({ queryKey: keys.library })
+  }, [qc])
 
   const handleFiles = async (files: FileList) => {
     for (const file of Array.from(files)) {
       try {
         const res = await upload.mutateAsync(file)
-        pendingJobIds.current.push(res.job_id)
+        setPendingJobIds(prev => [...prev, res.job_id])
       } catch (err) {
         console.error('Upload failed', err)
       }
@@ -176,12 +263,15 @@ export default function Library() {
         </div>
       )}
 
-      {songs.length === 0 && !upload.isPending ? (
+      {songs.length === 0 && pendingJobIds.length === 0 && !upload.isPending ? (
         <div className="py-8 text-center text-text-muted">
           还没有歌曲，上传一首开始吧
         </div>
       ) : (
         <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(200px,1fr))]">
+          {pendingJobIds.map(jobId => (
+            <AnalyzingCard key={jobId} jobId={jobId} onComplete={handleComplete} />
+          ))}
           {songs.map(song => (
             <SongCard
               key={song.job_id}

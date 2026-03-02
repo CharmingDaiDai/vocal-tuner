@@ -16,6 +16,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT     = Path(__file__).parent
@@ -33,6 +34,75 @@ def get_local_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def free_port(port: int) -> bool:
+    """检查端口是否可用；若被占用则尝试 kill 占用进程。返回最终是否可用。"""
+    # 先用 socket 探测
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", port))
+            return True  # 端口空闲
+        except OSError:
+            pass  # 被占用，继续处理
+
+    print(f"[!] 端口 {port} 被占用，正在自动清理…")
+
+    if sys.platform == "win32":
+        # netstat -ano | findstr :<port>
+        try:
+            out = subprocess.check_output(
+                ["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL
+            )
+            pids = set()
+            for line in out.splitlines():
+                if f":{port} " in line or f":{port}\t" in line:
+                    parts = line.split()
+                    if parts:
+                        try:
+                            pids.add(int(parts[-1]))
+                        except ValueError:
+                            pass
+            for pid in pids:
+                if pid == 0:
+                    continue
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    capture_output=True,
+                )
+                print(f"    已终止 PID {pid}")
+        except Exception as e:
+            print(f"[!] 清理失败：{e}")
+            return False
+    else:
+        # Linux / macOS: lsof -ti :<port> | xargs kill -9
+        try:
+            out = subprocess.check_output(
+                ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL
+            )
+            for pid_str in out.strip().splitlines():
+                pid = int(pid_str.strip())
+                os.kill(pid, 9)
+                print(f"    已终止 PID {pid}")
+        except Exception as e:
+            print(f"[!] 清理失败：{e}")
+            return False
+
+    # 等端口释放（最多 3 秒）
+    for _ in range(6):
+        time.sleep(0.5)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("0.0.0.0", port))
+                print(f"[✓] 端口 {port} 已释放")
+                return True
+            except OSError:
+                pass
+
+    print(f"[!] 端口 {port} 仍无法释放，请手动处理后重试")
+    return False
 
 
 def build_frontend(force: bool = False):
@@ -62,7 +132,7 @@ def main():
     parser.add_argument("--rebuild", action="store_true", help="强制重新 build 前端")
     parser.add_argument("--dev",     action="store_true", help="开发模式：跳过前端 build，开启 Python 热重载")
     parser.add_argument("--reload",  action="store_true", help="显式开启热重载（仅监视 .py 文件）")
-    parser.add_argument("--port",    type=int, default=8000, help="后端监听端口（默认 8000）")
+    parser.add_argument("--port",    type=int, default=9000, help="后端监听端口（默认 9000）")
     args = parser.parse_args()
 
     if not args.dev:
@@ -70,6 +140,9 @@ def main():
 
     ip   = get_local_ip()
     port = args.port
+
+    if not free_port(port):
+        sys.exit(1)
 
     print()
     print("=" * 50)

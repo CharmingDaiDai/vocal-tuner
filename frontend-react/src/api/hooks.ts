@@ -112,6 +112,18 @@ export function useUploadLyrics() {
   })
 }
 
+export function useUploadOriginal() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ jobId, file }: { jobId: string; file: File }) =>
+      api.uploadOriginal(jobId, file),
+    onSuccess: (_data, { jobId }) => {
+      qc.invalidateQueries({ queryKey: keys.library })
+      qc.invalidateQueries({ queryKey: keys.song(jobId) })
+    },
+  })
+}
+
 // ── Sessions ──────────────────────────────────────────────
 export function useSessions() {
   return useQuery({

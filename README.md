@@ -34,13 +34,13 @@ pip install -r requirements.txt
 ```bash
 conda activate vocal-tuner
 cd E:\Project\vocal-tuner\backend
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 9000
 ```
 
 ### 3. 打开浏览器
 
 ```
-http://localhost:8000
+http://localhost:9000
 ```
 
 点击 **▶ 开始** 即可实时检测。

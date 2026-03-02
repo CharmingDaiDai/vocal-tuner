@@ -10,7 +10,7 @@ import type {
   SessionDetail,
 } from '@/types'
 
-const BASE = ''  // same-origin; dev proxy handles /api → :8000
+const BASE = ''  // same-origin; dev proxy handles /api → :9000
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, init)
@@ -71,6 +71,15 @@ export const api = {
   },
   deleteLyrics: (jobId: string) =>
     apiFetch(`/api/library/${jobId}/lyrics`, { method: 'DELETE' }),
+
+  // Original track
+  uploadOriginal: (jobId: string, file: File): Promise<{ job_id: string; original_url: string; lyrics_auto: boolean }> => {
+    const form = new FormData()
+    form.append('file', file)
+    return apiFetch(`/api/library/${jobId}/original`, { method: 'POST', body: form })
+  },
+  deleteOriginal: (jobId: string) =>
+    apiFetch(`/api/library/${jobId}/original`, { method: 'DELETE' }),
 
   // Sessions
   sessions: () => apiFetch<{ sessions: SessionMeta[] }>('/api/sessions'),
