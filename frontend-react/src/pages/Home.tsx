@@ -15,13 +15,14 @@ import { NeedleMeter }  from '@/components/visualizers/NeedleMeter'
 import { PitchHistory } from '@/components/visualizers/PitchHistory'
 import { Piano }        from '@/components/visualizers/Piano'
 import { FftSpectrum }  from '@/components/visualizers/FftSpectrum'
+import { VibratoMeter } from '@/components/visualizers/VibratoMeter'
 import { TuneBadge }    from '@/components/ui/TuneBadge'
-import { useDevices, useSwitchDevice } from '@/api/hooks'
+import { useDevices, useSwitchDevice, useSaveSession } from '@/api/hooks'
 import { api } from '@/api/client'
 import { cn } from '@/lib/cn'
 import {
   Mic, MicOff, RotateCcw, ZoomIn, ZoomOut, Maximize2, Minimize2,
-  Download, AlignCenter,
+  Download, AlignCenter, Save, Circle,
 } from 'lucide-react'
 
 // ── Small toolbar button ──────────────────────────────────
@@ -64,6 +65,41 @@ export default function Home() {
 
   const { data: devicesData } = useDevices()
   const switchDevice = useSwitchDevice()
+  const saveSession = useSaveSession()
+
+  // ── WAV 录制状态 ───────────────────────────────────────
+  const [recording, setRecording] = useState(false)
+  const recordingStartRef = useRef<number>(0)
+
+  const handleToggleRecording = async () => {
+    if (recording) {
+      try {
+        const res = await api.stopRecording()
+        setRecording(false)
+        alert(`录音已保存（ID: ${res.session_id}）`)
+      } catch (e) {
+        setRecording(false)
+      }
+    } else {
+      await api.startRecording()
+      recordingStartRef.current = Date.now()
+      setRecording(true)
+    }
+  }
+
+  const handleSaveSession = () => {
+    if (recordedFrames.length === 0) {
+      alert('暂无练习数据')
+      return
+    }
+    const duration = recordedFrames.length > 0
+      ? (recordedFrames[recordedFrames.length - 1].ts - recordedFrames[0].ts)
+      : 0
+    saveSession.mutate(
+      { frames: recordedFrames as object[], duration },
+      { onSuccess: () => alert('练习已保存到练习记录') },
+    )
+  }
 
   // ── Confidence threshold ───────────────────────────────
   const [confThresh, setConfThreshLocal] = useState(0.45)
@@ -191,6 +227,16 @@ export default function Home() {
             <Download size={11} /> 导出 CSV
           </ToolBtn>
 
+          {/* Save session */}
+          <ToolBtn onClick={handleSaveSession} title="保存练习记录" active={saveSession.isPending}>
+            <Save size={11} /> 保存练习
+          </ToolBtn>
+
+          {/* WAV recording */}
+          <ToolBtn onClick={handleToggleRecording} title={recording ? '停止录音' : '开始录音'} active={recording} danger={recording}>
+            <Circle size={11} className={recording ? 'fill-bad text-bad animate-pulse' : ''} /> {recording ? '停止录音' : '录音'}
+          </ToolBtn>
+
           {/* Clear history */}
           <ToolBtn onClick={clearHistory} title="清除历史">
             <RotateCcw size={11} />
@@ -233,6 +279,9 @@ export default function Home() {
             <div className="relative h-16 flex-shrink-0 rounded-lg border border-border bg-bg-card overflow-hidden">
               <Piano highlightedMidi={midi} className="absolute inset-0" />
             </div>
+
+            {/* Vibrato indicator */}
+            <VibratoMeter pitch={latestPitch} className="flex-shrink-0" />
 
             {/* FFT spectrum */}
             <div className="relative h-20 flex-shrink-0 rounded-lg border border-border bg-bg-card overflow-hidden">

@@ -14,6 +14,8 @@ export const keys = {
   devices: ['devices'] as const,
   status: ['status'] as const,
   serverInfo: ['serverInfo'] as const,
+  sessions: ['sessions'] as const,
+  session: (id: string) => ['sessions', id] as const,
 }
 
 // ── Library ──────────────────────────────────────────────
@@ -95,6 +97,55 @@ export function useSwitchDevice() {
     mutationFn: api.switchDevice,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.devices })
+    },
+  })
+}
+
+export function useUploadLyrics() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ jobId, file }: { jobId: string; file: File }) =>
+      api.uploadLyrics(jobId, file),
+    onSuccess: (_data, { jobId }) => {
+      qc.invalidateQueries({ queryKey: keys.song(jobId) })
+    },
+  })
+}
+
+// ── Sessions ──────────────────────────────────────────────
+export function useSessions() {
+  return useQuery({
+    queryKey: keys.sessions,
+    queryFn: api.sessions,
+    staleTime: 5_000,
+  })
+}
+
+export function useSession(id: string | null) {
+  return useQuery({
+    queryKey: keys.session(id ?? ''),
+    queryFn: () => api.session(id!),
+    enabled: !!id,
+    staleTime: Infinity,
+  })
+}
+
+export function useSaveSession() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: api.saveSession,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.sessions })
+    },
+  })
+}
+
+export function useDeleteSession() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: api.deleteSession,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.sessions })
     },
   })
 }

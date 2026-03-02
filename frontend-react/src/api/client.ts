@@ -6,6 +6,8 @@ import type {
   UploadResponse,
   ServerInfo,
   StatusResponse,
+  SessionMeta,
+  SessionDetail,
 } from '@/types'
 
 const BASE = ''  // same-origin; dev proxy handles /api → :8000
@@ -60,4 +62,36 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conf_thresh }),
     }),
+
+  // Lyrics
+  uploadLyrics: (jobId: string, file: File): Promise<{ job_id: string; count: number }> => {
+    const form = new FormData()
+    form.append('file', file)
+    return apiFetch(`/api/library/${jobId}/lyrics`, { method: 'POST', body: form })
+  },
+  deleteLyrics: (jobId: string) =>
+    apiFetch(`/api/library/${jobId}/lyrics`, { method: 'DELETE' }),
+
+  // Sessions
+  sessions: () => apiFetch<{ sessions: SessionMeta[] }>('/api/sessions'),
+  session: (id: string) => apiFetch<SessionDetail>(`/api/sessions/${id}`),
+  saveSession: (data: {
+    frames: object[]
+    name?: string
+    song_job_id?: string
+    duration?: number
+    wav_session_id?: string
+  }): Promise<{ session_id: string; frame_count: number }> =>
+    apiFetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  deleteSession: (id: string) =>
+    apiFetch(`/api/sessions/${id}`, { method: 'DELETE' }),
+
+  // WAV recording
+  startRecording: () => apiFetch('/api/sessions/start-recording', { method: 'POST' }),
+  stopRecording: (): Promise<{ session_id: string; audio_url: string }> =>
+    apiFetch('/api/sessions/stop-recording', { method: 'POST' }),
 }

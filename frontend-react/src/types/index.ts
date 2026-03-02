@@ -26,6 +26,7 @@ export interface PitchMessage {
   ref_freq: number | null
   tune_level: 'good' | 'close' | 'off' | null
   fft: number[] | null
+  vibrato?: { is_vibrato: boolean; rate_hz: number; depth_cents: number } | null
 }
 
 export type WsMessage = StatusMessage | HeartbeatMessage | PitchMessage
@@ -87,6 +88,12 @@ export interface SongDetail extends SongMeta {
   fine_pitches: PitchPoint[]
   rms: number[]
   sr: number
+  lyrics?: LyricLine[]
+}
+
+export interface LyricLine {
+  t: number    // 时间戳（秒）
+  text: string // 歌词文本
 }
 
 export interface ServerInfo {
@@ -100,4 +107,20 @@ export interface StatusResponse {
   sample_rate: number
   chunk_size: number
   current_device: DeviceInfo | null
+}
+
+// ── 练习会话 ──────────────────────────────────────────────
+
+export interface SessionMeta {
+  session_id: string
+  name: string
+  song_job_id: string | null
+  duration: number
+  frame_count: number
+  created_at: string
+  has_audio: boolean
+}
+
+export interface SessionDetail extends SessionMeta {
+  frames: PitchMessage[]
 }

@@ -15,8 +15,8 @@ export default {
         bad:      '#f85149',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', '"Fira Code"', 'monospace'],
+        sans: ['system-ui', '-apple-system', '"Segoe UI"', 'sans-serif'],
+        mono: ['"Cascadia Code"', '"Fira Code"', 'ui-monospace', 'monospace'],
       },
     },
   },

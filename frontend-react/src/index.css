@@ -16,7 +16,7 @@ html, body, #root {
   padding: 0;
   background: #0d1117;
   color: #c9d1d9;
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 

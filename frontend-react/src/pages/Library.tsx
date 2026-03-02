@@ -1,10 +1,10 @@
 import { useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useLibrary, useUpload, useDeleteSong, useAnalysisJob } from '@/api/hooks'
+import { useLibrary, useUpload, useDeleteSong, useAnalysisJob, useUploadLyrics } from '@/api/hooks'
 import { Card } from '@/components/ui/Card'
 import { Spinner } from '@/components/ui/Spinner'
 import { ProgressBar } from '@/components/ui/ProgressBar'
-import { Upload, Trash2, Play, Music } from 'lucide-react'
+import { Upload, Trash2, Play, Music, FileText } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import type { SongMeta } from '@/types'
 
@@ -25,8 +25,31 @@ function AnalyzingCard({ jobId }: { jobId: string }) {
 }
 
 // ── Song card ──────────────────────────────────────────────
-function SongCard({ song, onDelete }: { song: SongMeta; onDelete: (id: string) => void }) {
+function SongCard({
+  song,
+  onDelete,
+}: {
+  song: SongMeta
+  onDelete: (id: string) => void
+}) {
   const navigate = useNavigate()
+  const uploadLyrics = useUploadLyrics()
+  const lrcInputRef = useRef<HTMLInputElement>(null)
+
+  const handleLrcFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    uploadLyrics.mutate(
+      { jobId: song.job_id, file },
+      {
+        onError: (err) => alert(`上传歌词失败：${err.message}`),
+        onSuccess: (res) => alert(`歌词上传成功（共 ${res.count} 行）`),
+      },
+    )
+    // 清空 input，允许重复上传同一文件
+    e.target.value = ''
+  }
+
   return (
     <Card className="group flex flex-col gap-2">
       <div className="flex items-start gap-2">
@@ -47,6 +70,18 @@ function SongCard({ song, onDelete }: { song: SongMeta; onDelete: (id: string) =
         >
           <Play size={11} /> 跟唱
         </button>
+        {/* 上传歌词按钮（悬浮显示） */}
+        <button
+          onClick={() => lrcInputRef.current?.click()}
+          disabled={uploadLyrics.isPending}
+          title="上传 .lrc 歌词文件"
+          className={cn(
+            'flex items-center justify-center rounded border border-border p-1 text-text-muted opacity-0 group-hover:opacity-100 hover:border-accent/40 hover:text-accent transition-all',
+            uploadLyrics.isPending && 'opacity-100 cursor-wait',
+          )}
+        >
+          {uploadLyrics.isPending ? <Spinner size="sm" /> : <FileText size={13} />}
+        </button>
         <button
           onClick={() => onDelete(song.job_id)}
           className="flex items-center justify-center rounded border border-border p-1 text-text-muted opacity-0 group-hover:opacity-100 hover:border-bad/40 hover:text-bad transition-all"
@@ -54,6 +89,13 @@ function SongCard({ song, onDelete }: { song: SongMeta; onDelete: (id: string) =
           <Trash2 size={13} />
         </button>
       </div>
+      <input
+        ref={lrcInputRef}
+        type="file"
+        accept=".lrc,text/plain"
+        className="hidden"
+        onChange={handleLrcFile}
+      />
     </Card>
   )
 }
@@ -123,7 +165,7 @@ export default function Library() {
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
       <div>
         <h1 className="text-lg font-semibold text-text">曲库</h1>
-        <p className="text-sm text-text-muted">上传音频，分析音高轨迹，进入跟唱模式</p>
+        <p className="text-sm text-text-muted">上传音频，分析音高轨迹，进入跟唱模式。悬浮歌曲卡片可上传 .lrc 歌词文件。</p>
       </div>
 
       <DropZone onFiles={handleFiles} />

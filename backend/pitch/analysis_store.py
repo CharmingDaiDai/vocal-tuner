@@ -1,16 +1,19 @@
 """
 analysis_store.py — 歌曲分析结果的文件系统持久化层
 
-每首歌在 uploads/ 目录下存一个 {job_id}.json 文件：
-  uploads/{job_id}.json  ← 元数据 + pitches + rms
-  uploads/{job_id}.flac  ← 原始音频（由上传流程保存）
+每首歌在 uploads/ 目录下存以下文件：
+  uploads/{job_id}.json      ← 元数据 + pitches + rms
+  uploads/{job_id}.meta.json ← 仅元数据（快速列表查询）
+  uploads/{job_id}.lrc.json  ← 可选：同步歌词 [{t, text}, ...]
 
 接口：
-  store.save(job_id, data)         → 写盘
-  store.load(job_id)               → 读完整数据（含 pitches）
-  store.list_all()                 → 所有歌曲元数据（不含 pitches）
-  store.delete(job_id, upload_dir) → 删除 json + 音频
-  store.exists(job_id)             → 是否存在
+  store.save(job_id, data)            → 写盘
+  store.load(job_id)                  → 读完整数据（含 pitches + lyrics）
+  store.list_all()                    → 所有歌曲元数据（不含 pitches）
+  store.save_lyrics(job_id, lyrics)   → 保存/覆盖歌词
+  store.load_lyrics(job_id)           → 读取歌词（不存在返回 None）
+  store.delete(job_id, upload_dir)    → 删除 json + audio + lrc
+  store.exists(job_id)                → 是否存在
 """
 
 import json
@@ -64,12 +67,38 @@ class AnalysisStore:
     # ── 读取 ────────────────────────────────────────────────
 
     def load(self, job_id: str) -> dict | None:
-        """读取完整数据（含 pitches）。"""
+        """读取完整数据（含 pitches）。若有歌词文件，自动附加 lyrics 字段。"""
         path = self._dir / f"{job_id}.json"
         if not path.exists():
             return None
         with path.open(encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # 自动附加歌词（如存在）
+        lyrics = self.load_lyrics(job_id)
+        if lyrics is not None:
+            data["lyrics"] = lyrics
+        return data
+
+    # ── 歌词 ────────────────────────────────────────────────
+
+    def save_lyrics(self, job_id: str, lyrics: list[dict]) -> None:
+        """保存（或覆盖）同步歌词列表，写入 {job_id}.lrc.json。"""
+        lrc_path = self._dir / f"{job_id}.lrc.json"
+        with lrc_path.open("w", encoding="utf-8") as f:
+            json.dump(lyrics, f, ensure_ascii=False, separators=(",", ":"))
+        logger.info(f"[Store] 已保存歌词 {job_id}（{len(lyrics)} 行）")
+
+    def load_lyrics(self, job_id: str) -> list[dict] | None:
+        """读取同步歌词，文件不存在返回 None。"""
+        lrc_path = self._dir / f"{job_id}.lrc.json"
+        if not lrc_path.exists():
+            return None
+        try:
+            with lrc_path.open(encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"[Store] 读取歌词失败（{job_id}）：{e}")
+            return None
 
     def list_all(self) -> list[dict]:
         """扫描 *.meta.json 返回元数据列表（按 mtime 倒序，不含 pitches）。
@@ -164,8 +193,8 @@ class AnalysisStore:
                     logger.info(f"[Store] 已删除音频 {filename}")
         except Exception as e:
             logger.warning(f"[Store] 删除音频失败（{job_id}）：{e}")
-        # 删除 json 和 meta
-        for p in (json_path, meta_path):
+        # 删除 json、meta 和歌词文件
+        for p in (json_path, meta_path, self._dir / f"{job_id}.lrc.json"):
             if p.exists():
                 p.unlink()
         logger.info(f"[Store] 已删除记录 {job_id}")

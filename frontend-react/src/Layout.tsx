@@ -1,11 +1,13 @@
 import { Outlet, NavLink } from 'react-router-dom'
-import { Mic, Library } from 'lucide-react'
+import { Mic, Library, BookOpen, Music2 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { useWsStore } from '@/store/wsStore'
 
 const NAV = [
   { to: '/home', icon: Mic, label: '调音' },
   { to: '/library', icon: Library, label: '曲库' },
+  { to: '/sessions', icon: BookOpen, label: '记录' },
+  { to: '/vocal-range', icon: Music2, label: '音域' },
 ]
 
 export default function Layout() {

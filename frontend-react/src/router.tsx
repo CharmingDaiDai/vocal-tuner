@@ -3,6 +3,8 @@ import Layout from './Layout'
 import Home from '@/pages/Home'
 import Library from '@/pages/Library'
 import Karaoke from '@/pages/Karaoke'
+import Sessions from '@/pages/Sessions'
+import VocalRange from '@/pages/VocalRange'
 
 const router = createBrowserRouter([
   {
@@ -13,6 +15,8 @@ const router = createBrowserRouter([
       { path: 'home', element: <Home /> },
       { path: 'library', element: <Library /> },
       { path: 'karaoke/:jobId', element: <Karaoke /> },
+      { path: 'sessions', element: <Sessions /> },
+      { path: 'vocal-range', element: <VocalRange /> },
     ],
   },
 ])

@@ -38,6 +38,9 @@ from pitch.detector import detect_pitch, compute_fft, warmup
 from pitch.music_theory import freq_to_note, is_in_tune
 from pitch.smoother import PitchSmoother, _CONF_THRESH
 from pitch.analysis_store import AnalysisStore
+from pitch.lrc_parser import parse_lrc, extract_lyrics_from_audio
+from pitch.session_store import SessionStore
+from pitch.vibrato import VibratoDetector
 from worker import worker_init, analyze_task
 
 logging.basicConfig(
@@ -48,8 +51,9 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────
 SAMPLE_RATE      = 44100
-CHUNK_SIZE       = 2048
-FFT_SKIP         = 5
+CHUNK_SIZE       = 2048   # 实时采集帧长（~46ms，与 pYIN frame_length=2048 对齐）
+WORKER_CHUNK_SIZE = 2048  # 离线分析保持高精度
+FFT_SKIP         = 3      # 每3帧计算一次FFT（原5，约70ms更新率更流畅）
 JOB_TTL_SECONDS  = 600
 PROGRESS_POLL_MS = 300
 WORKER_PROCESSES = 2
@@ -57,12 +61,14 @@ WORKER_PROCESSES = 2
 BACKEND_DIR  = Path(__file__).parent
 STATIC_DIR   = BACKEND_DIR / "static"
 UPLOAD_DIR   = BACKEND_DIR / "uploads"
+SESSION_DIR  = BACKEND_DIR / "sessions"
 
 # ── Global shared state ───────────────────────────────────
-capture   = AudioCapture()
-is_paused = False
+capture      = AudioCapture()
+is_paused    = False
 _global_conf_thresh: float = _CONF_THRESH  # runtime-adjustable via /api/settings
-store     = AnalysisStore(UPLOAD_DIR)
+store        = AnalysisStore(UPLOAD_DIR)
+session_store = SessionStore(SESSION_DIR)
 _jobs: Dict[str, dict] = {}
 
 
@@ -71,6 +77,7 @@ _jobs: Dict[str, dict] = {}
 class ClientSession:
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=10))
     smoother: PitchSmoother = field(default_factory=PitchSmoother)
+    vibrato: VibratoDetector = field(default_factory=VibratoDetector)
 
 
 _ws_clients: Dict[str, ClientSession] = {}
@@ -161,6 +168,12 @@ async def _pitch_broadcast_loop():
                                 "ref_freq":   note_info["ref_freq"],
                                 "tune_level": is_in_tune(note_info["cents"]),
                             })
+                        # Vibrato detection (only on voiced frames)
+                        midi_val = 69 + 12 * np.log2(pitch_result["freq"] / 440) if pitch_result["freq"] > 0 else None
+                        vib = sess.vibrato.feed(midi_val, True)
+                        msg["vibrato"] = vib
+                    else:
+                        sess.vibrato.feed(None, False)
 
                     if fft_data is not None and first_frame:
                         msg["fft"] = fft_data
@@ -185,13 +198,14 @@ async def lifespan(app: FastAPI):
     global _analysis_executor
 
     UPLOAD_DIR.mkdir(exist_ok=True)
+    SESSION_DIR.mkdir(exist_ok=True)
 
     await asyncio.to_thread(warmup, SAMPLE_RATE, CHUNK_SIZE)
 
     _analysis_executor = ProcessPoolExecutor(
         max_workers=WORKER_PROCESSES,
         initializer=worker_init,
-        initargs=(SAMPLE_RATE, CHUNK_SIZE),
+        initargs=(SAMPLE_RATE, WORKER_CHUNK_SIZE),  # 离线分析用更大帧长
         mp_context=mp.get_context("spawn"),
     )
 
@@ -225,7 +239,9 @@ app.add_middleware(
 
 # ── Static files ──────────────────────────────────────────
 UPLOAD_DIR.mkdir(exist_ok=True)
+SESSION_DIR.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+app.mount("/sessions", StaticFiles(directory=str(SESSION_DIR)), name="sessions")
 
 _assets_src = STATIC_DIR / "assets"
 if _assets_src.exists():
@@ -344,6 +360,37 @@ async def delete_library_item(job_id: str):
     return {"status": "deleted", "job_id": job_id}
 
 
+# ── REST — lyrics ──────────────────────────────────────────
+@app.post("/api/library/{job_id}/lyrics")
+async def upload_lyrics(job_id: str, file: UploadFile = File(...)):
+    """上传 .lrc 歌词文件，解析后保存为 {job_id}.lrc.json。"""
+    if not store.exists(job_id):
+        return JSONResponse({"error": "歌曲不存在"}, status_code=404)
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("gbk", errors="replace")
+
+    lyrics = parse_lrc(text)
+    if not lyrics:
+        return JSONResponse({"error": "未能解析到有效歌词，请检查 LRC 格式"}, status_code=400)
+
+    await asyncio.to_thread(store.save_lyrics, job_id, lyrics)
+    return {"job_id": job_id, "count": len(lyrics)}
+
+
+@app.delete("/api/library/{job_id}/lyrics")
+async def delete_lyrics(job_id: str):
+    """删除歌词文件。"""
+    lrc_path = UPLOAD_DIR / f"{job_id}.lrc.json"
+    if not lrc_path.exists():
+        return JSONResponse({"error": "歌词不存在"}, status_code=404)
+    lrc_path.unlink()
+    return {"status": "deleted", "job_id": job_id}
+
+
 # ── REST — analysis ───────────────────────────────────────
 @app.post("/api/analyze")
 async def upload_and_analyze(file: UploadFile = File(...)):
@@ -409,6 +456,17 @@ async def upload_and_analyze(file: UploadFile = File(...)):
                     "fine_pitches":  job["fine_pitches"],
                 }
                 await asyncio.to_thread(store.save, job_id, save_payload)
+
+                # 尝试从音频元数据提取同步歌词（SYLT）
+                try:
+                    auto_lyrics = await asyncio.to_thread(
+                        extract_lyrics_from_audio, str(filepath)
+                    )
+                    if auto_lyrics:
+                        await asyncio.to_thread(store.save_lyrics, job_id, auto_lyrics)
+                        logger.info(f"[Analyze] {job_id} 自动提取歌词 {len(auto_lyrics)} 行")
+                except Exception as e:
+                    logger.debug(f"[Analyze] {job_id} 歌词提取失败（非关键）：{e}")
         except Exception as e:
             logger.error(f"[Analyze] {job_id} 失败：{e}", exc_info=True)
             job = _jobs.get(job_id)
@@ -514,6 +572,108 @@ async def websocket_pitch(ws: WebSocket):
     finally:
         _ws_clients.pop(client_id, None)
         session.smoother.reset()
+        session.vibrato.reset()
+
+
+# ── REST — sessions ───────────────────────────────────────
+class SaveSessionRequest(BaseModel):
+    frames: list[dict]
+    name: Optional[str] = None
+    song_job_id: Optional[str] = None
+    duration: Optional[float] = None
+    wav_session_id: Optional[str] = None  # 如果有WAV录音，传入stop-recording返回的session_id
+
+
+@app.post("/api/sessions")
+async def save_session(req: SaveSessionRequest):
+    """保存当前练习会话的音高帧数据。若 wav_session_id 不为 None，
+    会将对应的临时 WAV 文件合并到新会话中。"""
+    session_id = str(uuid.uuid4())[:8]
+    # 只保留 voiced 帧（过滤静默帧，减小文件体积）
+    voiced_frames = [f for f in req.frames if f.get("voiced")]
+
+    # 计算实际时长
+    duration = req.duration
+    if not duration and voiced_frames:
+        ts_list = [f.get("ts", 0) for f in voiced_frames]
+        duration = max(ts_list) - min(ts_list)
+
+    # 链接临时 WAV 录音（若有）
+    has_audio = False
+    if req.wav_session_id:
+        old_wav = SESSION_DIR / f"{req.wav_session_id}.wav"
+        if old_wav.exists():
+            new_wav = SESSION_DIR / f"{session_id}.wav"
+            old_wav.rename(new_wav)
+            has_audio = True
+        # 清理临时会话的 meta/json 文件（若存在）
+        for ext in (".json", ".meta.json"):
+            old_file = SESSION_DIR / f"{req.wav_session_id}{ext}"
+            if old_file.exists():
+                old_file.unlink()
+
+    meta = {
+        "name":        req.name or f"练习 {datetime.now().isoformat(timespec='seconds')[:10]}",
+        "song_job_id": req.song_job_id,
+        "duration":    round(duration or 0.0, 1),
+        "created_at":  datetime.now().isoformat(timespec="seconds"),
+        "has_audio":   has_audio,
+    }
+    await asyncio.to_thread(session_store.save, session_id, meta, voiced_frames)
+    return {"session_id": session_id, "frame_count": len(voiced_frames)}
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    sessions = await asyncio.to_thread(session_store.list_all)
+    return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    data = await asyncio.to_thread(session_store.load, session_id)
+    if data is None:
+        return JSONResponse({"error": "会话不存在"}, status_code=404)
+    return data
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    ok = await asyncio.to_thread(session_store.delete, session_id)
+    if not ok:
+        return JSONResponse({"error": "会话不存在"}, status_code=404)
+    return {"status": "deleted", "session_id": session_id}
+
+
+# ── REST — WAV 录音 ───────────────────────────────────────
+@app.post("/api/sessions/start-recording")
+async def start_recording():
+    """开始录制麦克风 WAV 音频。"""
+    await asyncio.to_thread(capture.start_recording)
+    return {"status": "recording"}
+
+
+@app.post("/api/sessions/stop-recording")
+async def stop_recording():
+    """停止录制，保存 WAV 文件到临时位置（无 meta），
+    返回 wav_session_id 供后续 POST /api/sessions 时链接。"""
+    wav_bytes = await asyncio.to_thread(capture.stop_recording)
+    if wav_bytes is None:
+        return JSONResponse({"error": "未在录制中"}, status_code=400)
+
+    session_id = str(uuid.uuid4())[:8]
+    wav_path = SESSION_DIR / f"{session_id}.wav"
+    await asyncio.to_thread(wav_path.write_bytes, wav_bytes)
+
+    return {"session_id": session_id, "audio_url": f"/sessions/{session_id}.wav"}
+
+
+@app.get("/api/sessions/{session_id}/audio")
+async def get_session_audio(session_id: str):
+    wav_path = session_store.wav_path(session_id)
+    if not wav_path.exists():
+        return JSONResponse({"error": "录音文件不存在"}, status_code=404)
+    return FileResponse(str(wav_path), media_type="audio/wav")
 
 
 # ── SPA fallback (must be last) ───────────────────────────

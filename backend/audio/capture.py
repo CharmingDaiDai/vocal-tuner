@@ -1,14 +1,17 @@
 import asyncio
+import io
 import logging
 import numpy as np
 import sounddevice as sd
+import scipy.io.wavfile as wav_io
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 44100
-CHUNK_SIZE = 2048        # ~46 ms per frame
-CHANNELS = 1
+CHUNK_SIZE  = 2048   # pYIN 分析窗口大小（与 PYIN_FRAME_LENGTH 对齐）
+HOP_SIZE    = 1024   # 每次步进的新采样数（50% 重叠）→ 更新率 ~43Hz，曲线更平滑
+CHANNELS    = 1
 
 
 class AudioCapture:
@@ -16,6 +19,9 @@ class AudioCapture:
     封装 sounddevice 麦克风采集，通过 asyncio.Queue 桥接音频线程与 asyncio 事件循环。
     注意：sounddevice 的回调在独立线程中执行，不能直接调用 asyncio API，
     必须使用 loop.call_soon_threadsafe 或 queue.put_nowait。
+
+    同时支持 WAV 录制：调用 start_recording() / stop_recording() 控制录制状态，
+    stop_recording() 返回完整的 WAV 字节流（bytes）。
     """
 
     def __init__(
@@ -27,11 +33,16 @@ class AudioCapture:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self._loop = loop
-        # 单生产者广播架构下只有一个消费者，5 帧缓冲（~230ms）足够
-        self._queue: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=5)
+        # 单生产者广播架构下只有一个消费者，Queue 稍大以吸收重叠帧突发
+        # HOP_SIZE=1024 → 每 23ms 产一帧，maxsize=8 提供 ~184ms 缓冲
+        self._queue: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=8)
         self._stream: Optional[sd.InputStream] = None
         self._buffer = np.zeros(0, dtype=np.float32)
         self.current_device_id: Optional[int] = None  # None = 系统默认
+
+        # WAV 录制状态
+        self._recording: bool = False
+        self._rec_buffer: list[np.ndarray] = []
 
     @staticmethod
     def _safe_put(q: asyncio.Queue, item) -> None:
@@ -53,12 +64,17 @@ class AudioCapture:
         # 单声道：取第一通道
         mono = indata[:, 0].copy()
 
-        # 累积缓冲，满一帧再入队（避免过短帧影响检测精度）
+        # WAV 录制：将原始 PCM 写入内存缓冲
+        if self._recording:
+            self._rec_buffer.append(mono)
+
+        # 累积缓冲：新音频追加进来后，每移动 HOP_SIZE 个采样就发出一个
+        # CHUNK_SIZE 大小的分析窗口（50% 重叠），确保 pYIN 始终有完整的实音输入
         self._buffer = np.concatenate([self._buffer, mono])
 
         while len(self._buffer) >= self.chunk_size:
             frame = self._buffer[: self.chunk_size].copy()
-            self._buffer = self._buffer[self.chunk_size :]
+            self._buffer = self._buffer[HOP_SIZE :]   # 步进 HOP_SIZE，不是整帧
 
             # 线程安全地将帧推入 asyncio 队列
             # 用 _safe_put 包裹，保证队列满时不在事件循环中抛出未捕获异常
@@ -87,8 +103,9 @@ class AudioCapture:
             samplerate=self.sample_rate,
             channels=CHANNELS,
             dtype="float32",
-            # 1024 可将回调频率从 ~86 次/秒降到 ~43 次/秒，降低 CPU 压力
-            blocksize=1024,
+            # blocksize=HOP_SIZE：每次 callback 交付 HOP_SIZE 个新样本（1024 = ~23ms）
+            # 配合 _callback 中的滑动窗口，实现 CHUNK_SIZE=2048 的分析窗口以 50% 重叠滑动
+            blocksize=HOP_SIZE,
             callback=self._callback,
         )
         self._stream.start()
@@ -114,6 +131,41 @@ class AudioCapture:
             return await asyncio.wait_for(self._queue.get(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
+
+    # ── WAV 录制接口 ─────────────────────────────────────────
+
+    def start_recording(self) -> None:
+        """开始将原始 PCM 音频写入内存缓冲（线程安全，可在任何线程调用）。"""
+        self._rec_buffer.clear()
+        self._recording = True
+        logger.info("WAV 录制已开始")
+
+    def stop_recording(self) -> Optional[bytes]:
+        """
+        停止录制，将缓冲中的 PCM 数据编码为 WAV 字节流并返回。
+        若未在录制中，返回 None。
+        """
+        if not self._recording:
+            return None
+        self._recording = False
+
+        if not self._rec_buffer:
+            return None
+
+        audio_data = np.concatenate(self._rec_buffer).astype(np.float32)
+        # 转为 16-bit PCM（WAV 兼容性最好）
+        audio_int16 = (audio_data * 32767).clip(-32768, 32767).astype(np.int16)
+
+        buf = io.BytesIO()
+        wav_io.write(buf, self.sample_rate, audio_int16)
+        wav_bytes = buf.getvalue()
+
+        self._rec_buffer.clear()
+        logger.info(f"WAV 录制已停止，共 {len(audio_data) / self.sample_rate:.1f}s，"
+                    f"{len(wav_bytes) // 1024} KB")
+        return wav_bytes
+
+    # ── 设备列表 ─────────────────────────────────────────────
 
     def list_devices(self) -> list[dict]:
         """列出所有可用音频输入设备，标注默认设备和当前使用设备。"""
