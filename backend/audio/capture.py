@@ -136,6 +136,9 @@ class AudioCapture:
 
     def start_recording(self) -> None:
         """开始将原始 PCM 音频写入内存缓冲（线程安全，可在任何线程调用）。"""
+        if self._recording:
+            logger.debug("start_recording 被重复调用，忽略")
+            return
         self._rec_buffer.clear()
         self._recording = True
         logger.info("WAV 录制已开始")

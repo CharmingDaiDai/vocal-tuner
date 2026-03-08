@@ -214,6 +214,22 @@ async def _pitch_broadcast_loop():
             await asyncio.sleep(0.1)
 
 
+def _cleanup_orphan_wavs():
+    """删除 sessions/ 中超过 1 小时且无对应 session JSON 的孤儿 WAV 文件。"""
+    import time as _time
+    now = _time.time()
+    count = 0
+    for wav in SESSION_DIR.glob("*.wav"):
+        sid = wav.stem
+        has_session = (SESSION_DIR / f"{sid}.json").exists() or \
+                      (SESSION_DIR / f"{sid}.meta.json").exists()
+        if not has_session and (now - wav.stat().st_mtime) > 3600:
+            wav.unlink()
+            count += 1
+    if count:
+        logger.info(f"清理了 {count} 个孤儿 WAV 文件")
+
+
 # ── Lifespan ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -221,6 +237,9 @@ async def lifespan(app: FastAPI):
 
     UPLOAD_DIR.mkdir(exist_ok=True)
     SESSION_DIR.mkdir(exist_ok=True)
+
+    # 清理孤儿 WAV（有临时 WAV 但无对应 session，且超过 1 小时）
+    _cleanup_orphan_wavs()
 
     await asyncio.to_thread(warmup, SAMPLE_RATE, CHUNK_SIZE)
 
@@ -710,6 +729,11 @@ async def save_session(req: SaveSessionRequest):
             new_wav = SESSION_DIR / f"{session_id}.wav"
             old_wav.rename(new_wav)
             has_audio = True
+        else:
+            logger.warning(
+                "WAV link failed: %s.wav not found (session %s)",
+                req.wav_session_id, session_id,
+            )
         # 清理临时会话的 meta/json 文件（若存在）
         for ext in (".json", ".meta.json"):
             old_file = SESSION_DIR / f"{req.wav_session_id}{ext}"
@@ -724,7 +748,7 @@ async def save_session(req: SaveSessionRequest):
         "has_audio":   has_audio,
     }
     await asyncio.to_thread(session_store.save, session_id, meta, voiced_frames)
-    return {"session_id": session_id, "frame_count": len(voiced_frames)}
+    return {"session_id": session_id, "frame_count": len(voiced_frames), "has_audio": has_audio}
 
 
 @app.get("/api/sessions")
@@ -763,7 +787,8 @@ async def stop_recording():
     返回 wav_session_id 供后续 POST /api/sessions 时链接。"""
     wav_bytes = await asyncio.to_thread(capture.stop_recording)
     if wav_bytes is None:
-        return JSONResponse({"error": "未在录制中"}, status_code=400)
+        # 返回 200 但 session_id=null，让前端区分"没在录"和真正出错
+        return {"session_id": None, "audio_url": None}
 
     session_id = str(uuid.uuid4())[:8]
     wav_path = SESSION_DIR / f"{session_id}.wav"
