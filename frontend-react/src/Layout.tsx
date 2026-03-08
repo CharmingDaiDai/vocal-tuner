@@ -2,6 +2,7 @@ import { Outlet, NavLink } from 'react-router-dom'
 import { Mic, Library, BookOpen, Music2 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { useWsStore } from '@/store/wsStore'
+import { ToastContainer } from '@/components/ui/Toast'
 
 const NAV = [
   { to: '/home', icon: Mic, label: '调音' },
@@ -15,6 +16,7 @@ export default function Layout() {
 
   return (
     <div className="flex h-full">
+      <ToastContainer />
       {/* Sidebar */}
       <nav className="flex w-14 flex-col items-center gap-1 border-r border-border bg-bg py-3">
         {/* Logo */}

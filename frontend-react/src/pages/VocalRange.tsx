@@ -76,16 +76,46 @@ const TARGET_LOW_MIDI = 52   // E3 — a comfortable starting point going down
 const TARGET_HIGH_MIDI = 64  // E4 — going up
 const HOLD_FRAMES = 8        // frames to hold note for it to count
 
+const STORAGE_KEY = 'vocal-range-result'
+
+interface SavedRange {
+  minMidi: number
+  maxMidi: number
+  date: string
+}
+
+function loadSavedRange(): SavedRange | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch { return null }
+}
+
+function saveRange(minMidi: number, maxMidi: number) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    minMidi, maxMidi, date: new Date().toISOString().slice(0, 10),
+  }))
+}
+
 export default function VocalRange() {
   const { latestPitch } = useWsStore()
+  const saved = loadSavedRange()
   const [phase, setPhase] = useState<Phase>('idle')
-  const [minMidi, setMinMidi] = useState<number | null>(null)
-  const [maxMidi, setMaxMidi] = useState<number | null>(null)
+  const [minMidi, setMinMidi] = useState<number | null>(saved?.minMidi ?? null)
+  const [maxMidi, setMaxMidi] = useState<number | null>(saved?.maxMidi ?? null)
   const [currentTarget, setCurrentTarget] = useState<number>(TARGET_LOW_MIDI)
   const [heldFrames, setHeldFrames] = useState(0)
   const [succeeded, setSucceeded] = useState<Set<number>>(new Set())
   const [message, setMessage] = useState('')
   const heldRef = useRef(0)
+
+  // Persist to localStorage when test completes
+  useEffect(() => {
+    if (phase === 'done' && minMidi != null && maxMidi != null) {
+      saveRange(minMidi, maxMidi)
+    }
+  }, [phase, minMidi, maxMidi])
 
   const startTest = () => {
     setPhase('testing-low')
@@ -166,6 +196,17 @@ export default function VocalRange() {
       <div className="rounded-xl border border-border bg-bg-card p-6 flex flex-col items-center gap-4">
         {phase === 'idle' && (
           <>
+            {saved && (
+              <div className="text-center">
+                <div className="text-xs text-text-muted mb-1">上次测试（{saved.date}）</div>
+                <div className="font-mono text-lg font-bold text-accent">
+                  {TEST_NOTES.find(n => n.midi === saved.minMidi)?.label} — {TEST_NOTES.find(n => n.midi === saved.maxMidi)?.label}
+                </div>
+                <div className="text-xs text-text-muted">
+                  {saved.maxMidi - saved.minMidi + 1} 个半音 ({((saved.maxMidi - saved.minMidi) / 12).toFixed(1)} 个八度)
+                </div>
+              </div>
+            )}
             <p className="text-sm text-text-muted text-center max-w-xs">
               点击开始后，按提示依次演唱每个音名，每个音持续约 0.2 秒即可记录。
               未能演唱的音将标记为边界。
@@ -174,7 +215,7 @@ export default function VocalRange() {
               onClick={startTest}
               className="rounded-lg bg-accent px-6 py-2 text-sm font-medium text-bg hover:bg-accent/80 transition-colors"
             >
-              开始测试
+              {saved ? '重新测试' : '开始测试'}
             </button>
           </>
         )}
@@ -246,6 +287,15 @@ export default function VocalRange() {
             >
               重新测试
             </button>
+            <div className="mt-2 w-full max-w-sm rounded border border-border/50 bg-bg/50 px-4 py-3 text-center">
+              <div className="text-xs font-medium text-text-muted mb-1.5">参考声部范围：</div>
+              <div className="text-[11px] text-text-muted leading-relaxed">
+                <span>男低音 E2-E4</span> · <span>男中音 A2-A4</span> · <span>男高音 C3-C5</span>
+              </div>
+              <div className="text-[11px] text-text-muted leading-relaxed">
+                <span>女低音 E3-E5</span> · <span>女中音 A3-A5</span> · <span>女高音 C4-C6</span>
+              </div>
+            </div>
           </>
         )}
       </div>

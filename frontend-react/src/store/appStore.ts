@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { PitchMessage } from '@/types'
+import { toast } from './toastStore'
 
 export type VisStyle = 'piano' | 'line'
 
@@ -69,7 +70,7 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
   exportCSV() {
     const frames = get().recordedFrames
     if (frames.length === 0) {
-      alert('暂无数据，请先开始检测。')
+      toast.info('暂无数据，请先开始检测')
       return
     }
     const header = 'timestamp,freq_hz,note,cents,confidence\n'

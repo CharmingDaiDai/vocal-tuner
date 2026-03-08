@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useSessions, useDeleteSession, useSession, useSong } from '@/api/hooks'
 import { Card } from '@/components/ui/Card'
 import { Spinner } from '@/components/ui/Spinner'
-import { Trash2, BarChart2, ChevronLeft } from 'lucide-react'
+import { Trash2, BarChart2, ChevronLeft, Search, Headphones } from 'lucide-react'
 import type { SessionMeta } from '@/types'
 import PracticeReport from '@/components/PracticeReport'
 
@@ -39,6 +39,11 @@ function SessionCard({
         >
           <BarChart2 size={11} /> 查看报告
         </button>
+        {session.has_audio && (
+          <div className="flex items-center justify-center rounded border border-accent/30 px-1.5 text-accent" title="含录音">
+            <Headphones size={13} />
+          </div>
+        )}
         <button
           onClick={() => onDelete(session.session_id)}
           className="flex items-center justify-center rounded border border-border p-1 text-text-muted opacity-0 group-hover:opacity-100 hover:border-bad/40 hover:text-bad transition-all"
@@ -111,6 +116,8 @@ export default function Sessions() {
   const { data, isLoading } = useSessions()
   const deleteSession = useDeleteSession()
   const [reportSessionId, setReportSessionId] = useState<string | null>(null)
+  const [searchText, setSearchText] = useState('')
+  const [filterMode, setFilterMode] = useState<'all' | 'karaoke'>('all')
 
   if (reportSessionId) {
     return (
@@ -129,13 +136,46 @@ export default function Sessions() {
     )
   }
 
-  const sessions = data?.sessions ?? []
+  const sessions = (data?.sessions ?? []).filter(s => {
+    if (searchText && !s.name.toLowerCase().includes(searchText.toLowerCase())) return false
+    if (filterMode === 'karaoke' && !s.song_job_id) return false
+    return true
+  })
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
       <div>
         <h1 className="text-lg font-semibold text-text">练习记录</h1>
         <p className="text-sm text-text-muted">查看历史练习数据、录音回放和练习报告</p>
+      </div>
+
+      {/* Search & filter bar */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1">
+          <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+          <input
+            type="text"
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            placeholder="搜索练习记录…"
+            className="w-full rounded border border-border bg-bg-card py-1.5 pl-8 pr-3 text-sm text-text placeholder:text-text-muted/50 outline-none focus:border-accent/50"
+          />
+        </div>
+        <div className="flex rounded border border-border text-xs">
+          {([['all', '全部'], ['karaoke', '跟唱']] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              onClick={() => setFilterMode(mode)}
+              className={`px-3 py-1 transition-colors ${
+                filterMode === mode
+                  ? 'bg-accent/20 text-accent'
+                  : 'text-text-muted hover:text-text'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {sessions.length === 0 ? (

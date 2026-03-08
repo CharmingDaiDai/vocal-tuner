@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { useBlocker } from 'react-router-dom'
 import { useWsStore } from '@/store/wsStore'
 import { useAppStore } from '@/store/appStore'
 import { NeedleMeter }  from '@/components/visualizers/NeedleMeter'
@@ -20,6 +21,7 @@ import { TuneBadge }    from '@/components/ui/TuneBadge'
 import { useDevices, useSwitchDevice, useSaveSession } from '@/api/hooks'
 import { api } from '@/api/client'
 import { cn } from '@/lib/cn'
+import { toast } from '@/store/toastStore'
 import {
   Mic, MicOff, RotateCcw, ZoomIn, ZoomOut, Maximize2, Minimize2,
   Download, AlignCenter, Save, Circle,
@@ -76,7 +78,7 @@ export default function Home() {
       try {
         const res = await api.stopRecording()
         setRecording(false)
-        alert(`录音已保存（ID: ${res.session_id}）`)
+        toast.success('录音已保存')
       } catch (e) {
         setRecording(false)
       }
@@ -89,7 +91,7 @@ export default function Home() {
 
   const handleSaveSession = () => {
     if (recordedFrames.length === 0) {
-      alert('暂无练习数据')
+      toast.info('暂无练习数据')
       return
     }
     const duration = recordedFrames.length > 0
@@ -97,7 +99,7 @@ export default function Home() {
       : 0
     saveSession.mutate(
       { frames: recordedFrames as object[], duration },
-      { onSuccess: () => alert('练习已保存到练习记录') },
+      { onSuccess: () => toast.success('练习已保存到练习记录') },
     )
   }
 
@@ -149,6 +151,27 @@ export default function Home() {
     return () => document.removeEventListener('keydown', handleKeyEsc)
   }, [expanded, handleKeyEsc])
 
+  // ── Unsaved data warning on navigation ──────────────────────
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      recordedFrames.length > 50 && currentLocation.pathname !== nextLocation.pathname,
+  )
+
+  useEffect(() => {
+    if (blocker.state === 'blocked') {
+      const leave = window.confirm('有未保存的练习数据，确认离开？')
+      if (leave) blocker.proceed()
+      else blocker.reset()
+    }
+  }, [blocker])
+
+  useEffect(() => {
+    if (recordedFrames.length <= 50) return
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault() }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [recordedFrames.length])
+
   // ── MIDI note for Piano highlight ─────────────────────────
   const midi = latestPitch?.voiced && latestPitch.freq > 0
     ? Math.round(69 + 12 * Math.log2(latestPitch.freq / 440))
@@ -174,25 +197,31 @@ export default function Home() {
         </span>
 
         {/* Device selector */}
-        {devicesData && (
-          <label className="flex items-center gap-1.5 ml-2">
-            <span className="text-xs text-text-muted">🎧</span>
-            <select
-              className="rounded border border-border bg-bg-card px-2 py-1 text-xs text-text max-w-[220px]"
-              onChange={e => switchDevice.mutate(e.target.value === '' ? null : parseInt(e.target.value))}
-            >
-              {devicesData.devices.map(d => (
+        <label className="flex items-center gap-1.5 ml-2">
+          <span className="text-xs text-text-muted">🎧</span>
+          <select
+            className="rounded border border-border bg-bg-card px-2 py-1 text-xs text-text max-w-[220px]"
+            disabled={!devicesData}
+            onChange={e => switchDevice.mutate(e.target.value === '' ? null : parseInt(e.target.value), {
+              onError: (err) => toast.error(`切换设备失败：${err instanceof Error ? err.message : '未知错误'}`),
+            })}
+          >
+            {!devicesData ? (
+              <option disabled>加载设备…</option>
+            ) : (
+              devicesData.devices.map(d => (
                 <option key={d.id ?? 'default'} value={d.id ?? ''}>
                   {d.is_default ? '⭐ ' : ''}{d.name}
                 </option>
-              ))}
-            </select>
-          </label>
-        )}
+              ))
+            )}
+          </select>
+        </label>
 
         {/* Confidence threshold slider */}
-        <label className="flex items-center gap-1.5 ml-2" title="置信度门控：低于此值的帧不显示音高">
+        <div className="flex items-center gap-1.5 ml-2" title="低于此置信度的音高检测将被过滤掉">
           <span className="text-xs text-text-muted whitespace-nowrap">置信度</span>
+          <span className="text-[10px] text-text-muted">低</span>
           <input
             type="range"
             min={0}
@@ -202,10 +231,11 @@ export default function Home() {
             onChange={e => handleConfChange(parseInt(e.target.value) / 100)}
             className="w-20 accent-accent cursor-pointer"
           />
-          <span className="w-7 text-right font-mono text-xs text-text-muted">
+          <span className="text-[10px] text-text-muted">高</span>
+          <span className="w-8 text-center font-mono text-xs text-accent font-medium">
             {Math.round(confThresh * 100)}%
           </span>
-        </label>
+        </div>
 
         <div className="ml-auto flex items-center gap-1.5 flex-wrap">
           {/* Style */}

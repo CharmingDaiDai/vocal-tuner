@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card'
 import { Spinner } from '@/components/ui/Spinner'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { Upload, Trash2, Play, Music, FileText, Disc } from 'lucide-react'
+import { toast } from '@/store/toastStore'
 import { cn } from '@/lib/cn'
 import type { SongMeta } from '@/types'
 
@@ -18,7 +19,7 @@ function AnalyzingCard({ jobId, onComplete }: { jobId: string; onComplete: (id: 
   const lrcInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (data?.status === 'done' || data?.status === 'error') {
+    if (data?.status === 'done') {
       onComplete(jobId)
     }
   }, [data?.status, jobId, onComplete])
@@ -37,35 +38,47 @@ function AnalyzingCard({ jobId, onComplete }: { jobId: string; onComplete: (id: 
     e.target.value = ''
   }
 
+  const isFailed = data?.status === 'error'
+
   return (
-    <Card className="opacity-70">
+    <Card className={isFailed ? 'opacity-90' : 'opacity-70'}>
       <div className="flex items-center gap-3">
-        <Spinner size="sm" />
+        {isFailed ? (
+          <div className="flex h-5 w-5 items-center justify-center rounded-full bg-bad/20 text-bad text-xs font-bold">!</div>
+        ) : (
+          <Spinner size="sm" />
+        )}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm text-text">{data?.original_name ?? jobId}</div>
-          <ProgressBar value={data?.progress ?? 0} showLabel className="mt-1.5" />
+          {isFailed ? (
+            <div className="mt-1.5 text-xs text-bad font-medium">分析失败</div>
+          ) : (
+            <ProgressBar value={data?.progress ?? 0} showLabel className="mt-1.5" />
+          )}
         </div>
       </div>
-      <div className="mt-2 flex gap-1.5">
-        <button
-          onClick={() => origInputRef.current?.click()}
-          disabled={uploadOriginal.isPending}
-          title="上传原文件（用于播放）"
-          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-xs text-text-muted hover:border-accent/40 hover:text-accent transition-colors"
-        >
-          {uploadOriginal.isPending ? <Spinner size="sm" /> : <Disc size={11} />}
-          原文件
-        </button>
-        <button
-          onClick={() => lrcInputRef.current?.click()}
-          disabled={uploadLyrics.isPending}
-          title="上传 .lrc 歌词文件"
-          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-xs text-text-muted hover:border-accent/40 hover:text-accent transition-colors"
-        >
-          {uploadLyrics.isPending ? <Spinner size="sm" /> : <FileText size={11} />}
-          歌词
-        </button>
-      </div>
+      {!isFailed && (
+        <div className="mt-2 flex gap-1.5">
+          <button
+            onClick={() => origInputRef.current?.click()}
+            disabled={uploadOriginal.isPending}
+            title="上传原文件（用于播放）"
+            className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-xs text-text-muted hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            {uploadOriginal.isPending ? <Spinner size="sm" /> : <Disc size={11} />}
+            原文件
+          </button>
+          <button
+            onClick={() => lrcInputRef.current?.click()}
+            disabled={uploadLyrics.isPending}
+            title="上传 .lrc 歌词文件"
+            className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-xs text-text-muted hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            {uploadLyrics.isPending ? <Spinner size="sm" /> : <FileText size={11} />}
+            歌词
+          </button>
+        </div>
+      )}
       <input ref={origInputRef} type="file" accept="audio/*" className="hidden" onChange={handleOrigFile} />
       <input ref={lrcInputRef} type="file" accept=".lrc,text/plain" className="hidden" onChange={handleLrcFile} />
     </Card>
@@ -92,8 +105,8 @@ function SongCard({
     uploadLyrics.mutate(
       { jobId: song.job_id, file },
       {
-        onError: (err) => alert(`上传歌词失败：${err.message}`),
-        onSuccess: (res) => alert(`歌词上传成功（共 ${res.count} 行）`),
+        onError: (err) => toast.error(`上传歌词失败：${err.message}`),
+        onSuccess: (res) => toast.success(`歌词上传成功（共 ${res.count} 行）`),
       },
     )
     e.target.value = ''
@@ -104,7 +117,7 @@ function SongCard({
     if (!file) return
     uploadOriginal.mutate(
       { jobId: song.job_id, file },
-      { onError: (err) => alert(`上传原文件失败：${err.message}`) },
+      { onError: (err) => toast.error(`上传原文件失败：${err.message}`) },
     )
     e.target.value = ''
   }
@@ -187,7 +200,13 @@ function DropZone({ onFiles }: { onFiles: (files: FileList) => void }) {
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
-    if (e.dataTransfer.files.length) onFiles(e.dataTransfer.files)
+    const files = e.dataTransfer.files
+    if (!files.length) return
+    const hasInvalid = Array.from(files).some(f => !f.type.startsWith('audio/'))
+    if (hasInvalid) {
+      toast.error('不支持的文件格式，请上传音频文件')
+    }
+    onFiles(files)
   }, [onFiles])
 
   return (
@@ -229,6 +248,10 @@ export default function Library() {
 
   const handleFiles = async (files: FileList) => {
     for (const file of Array.from(files)) {
+      if (!file.type.startsWith('audio/')) {
+        toast.error('不支持的文件格式，请上传音频文件')
+        continue
+      }
       try {
         const res = await upload.mutateAsync(file)
         setPendingJobIds(prev => [...prev, res.job_id])

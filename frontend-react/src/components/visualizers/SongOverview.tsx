@@ -8,6 +8,8 @@ interface Props {
   duration: number
   currentTime?: number
   onSeek?: (t: number) => void
+  loopA?: number | null
+  loopB?: number | null
   className?: string
 }
 
@@ -16,7 +18,7 @@ function tuneColor(midi: number | null): string {
   return '#58a6ff'
 }
 
-export function SongOverview({ pitches, rms, duration, currentTime, onSeek, className }: Props) {
+export function SongOverview({ pitches, rms, duration, currentTime, onSeek, loopA, loopB, className }: Props) {
   const dragRef = useRef(false)
 
   const canvasRef = useCanvas((ctx, { w, h }) => {
@@ -74,6 +76,55 @@ export function SongOverview({ pitches, rms, duration, currentTime, onSeek, clas
       ctx.lineTo(px, h)
       ctx.stroke()
       ctx.setLineDash([])
+    }
+
+    // A-B Loop region
+    if (loopA != null && loopB != null) {
+      const ax = tToX(loopA)
+      const bx = tToX(loopB)
+      // Highlighted region
+      ctx.fillStyle = '#58a6ff18'
+      ctx.fillRect(ax, 0, bx - ax, h)
+      // Region borders
+      ctx.strokeStyle = '#58a6ff80'
+      ctx.lineWidth = 1
+      ctx.setLineDash([])
+      ctx.beginPath()
+      ctx.moveTo(ax, 0); ctx.lineTo(ax, h)
+      ctx.moveTo(bx, 0); ctx.lineTo(bx, h)
+      ctx.stroke()
+      // Labels
+      ctx.font = 'bold 9px sans-serif'
+      ctx.fillStyle = '#58a6ff'
+      ctx.textBaseline = 'top'
+      ctx.fillText('A', ax + 2, 2)
+      ctx.fillText('B', bx + 2, 2)
+    } else {
+      // Draw individual markers if only one is set
+      if (loopA != null) {
+        const ax = tToX(loopA)
+        ctx.strokeStyle = '#58a6ff80'
+        ctx.lineWidth = 1
+        ctx.setLineDash([2, 2])
+        ctx.beginPath(); ctx.moveTo(ax, 0); ctx.lineTo(ax, h); ctx.stroke()
+        ctx.setLineDash([])
+        ctx.font = 'bold 9px sans-serif'
+        ctx.fillStyle = '#58a6ff'
+        ctx.textBaseline = 'top'
+        ctx.fillText('A', ax + 2, 2)
+      }
+      if (loopB != null) {
+        const bx = tToX(loopB)
+        ctx.strokeStyle = '#58a6ff80'
+        ctx.lineWidth = 1
+        ctx.setLineDash([2, 2])
+        ctx.beginPath(); ctx.moveTo(bx, 0); ctx.lineTo(bx, h); ctx.stroke()
+        ctx.setLineDash([])
+        ctx.font = 'bold 9px sans-serif'
+        ctx.fillStyle = '#58a6ff'
+        ctx.textBaseline = 'top'
+        ctx.fillText('B', bx + 2, 2)
+      }
     }
   })
 

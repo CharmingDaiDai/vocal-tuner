@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { PitchMessage, WsMessage } from '@/types'
+import { toast } from './toastStore'
 
 const WS_URL = (() => {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -19,6 +20,8 @@ interface WsState {
   _listeners: Set<(msg: WsMessage) => void>
   _backoff: number
   _retryTimer: ReturnType<typeof setTimeout> | null
+  _wasConnected: boolean  // true if we had a successful connection before
+  _disconnectToastShown: boolean
 }
 
 interface WsActions {
@@ -37,6 +40,8 @@ export const useWsStore = create<WsState & WsActions>((set, get) => ({
   _listeners: new Set(),
   _backoff: BASE_BACKOFF,
   _retryTimer: null,
+  _wasConnected: false,
+  _disconnectToastShown: false,
 
   connect() {
     const state = get()
@@ -45,7 +50,12 @@ export const useWsStore = create<WsState & WsActions>((set, get) => ({
     const ws = new WebSocket(WS_URL)
 
     ws.onopen = () => {
-      set({ connected: true, _backoff: BASE_BACKOFF })
+      const wasConnected = get()._wasConnected
+      set({ connected: true, _backoff: BASE_BACKOFF, _wasConnected: true })
+      if (wasConnected && get()._disconnectToastShown) {
+        toast.success('麦克风已重新连接')
+        set({ _disconnectToastShown: false })
+      }
     }
 
     ws.onmessage = (e) => {
@@ -63,7 +73,17 @@ export const useWsStore = create<WsState & WsActions>((set, get) => ({
     }
 
     ws.onclose = () => {
+      const wasConnected = get()._wasConnected
       set({ connected: false, _ws: null })
+      // Show toast after first disconnect (not on initial load)
+      if (wasConnected && !get()._disconnectToastShown) {
+        setTimeout(() => {
+          if (!get().connected) {
+            toast.error('麦克风连接中断，正在重连…')
+            set({ _disconnectToastShown: true })
+          }
+        }, 2000)
+      }
       const backoff = get()._backoff
       const timer = setTimeout(() => {
         get().connect()
